@@ -9,19 +9,21 @@ This revision avoids runtime UART0/USB conflict on Node A.
 - B sends radar telemetry to A over ESP-NOW.
 - A outputs combined JSON stream to the PC over USB serial.
 
+Facing outward from the bar, sensor ordering is left-to-right: `S0, S1, S2, S3, S4`.
+
 ## UART mapping (recommended)
 
 ### ESP32_A (2 sensors + USB)
 
-- `S0` on UART1: ESP32 GPIO16 (RX) <- LD2450 TX, ESP32 GPIO17 (TX) -> LD2450 RX
-- `S1` on UART2: ESP32 GPIO18 (RX) <- LD2450 TX, ESP32 GPIO19 (TX) -> LD2450 RX
+- `S0` on UART2: ESP32 GPIO18 (RX) <- LD2450 TX, ESP32 GPIO19 (TX) -> LD2450 RX
+- `S1` on UART1: ESP32 GPIO16 (RX) <- LD2450 TX, ESP32 GPIO17 (TX) -> LD2450 RX
 - Keep UART0 for USB flashing + host serial data.
 
 ### ESP32_B (3 sensors, no host serial required)
 
-- `S2` on UART0 remapped: ESP32 GPIO4 (RX) <- LD2450 TX, ESP32 GPIO5 (TX) -> LD2450 RX
-- `S3` on UART1: ESP32 GPIO16 (RX) <- LD2450 TX, ESP32 GPIO17 (TX) -> LD2450 RX
-- `S4` on UART2: ESP32 GPIO18 (RX) <- LD2450 TX, ESP32 GPIO19 (TX) -> LD2450 RX
+- `S2` on UART1: ESP32 GPIO16 (RX) <- LD2450 TX, ESP32 GPIO17 (TX) -> LD2450 RX
+- `S3` on UART2: ESP32 GPIO18 (RX) <- LD2450 TX, ESP32 GPIO19 (TX) -> LD2450 RX
+- `S4` on UART0 remapped: ESP32 GPIO4 (RX) <- LD2450 TX, ESP32 GPIO5 (TX) -> LD2450 RX
 
 ## Power distribution
 
@@ -50,6 +52,6 @@ This revision avoids runtime UART0/USB conflict on Node A.
 
 ## Mechanical placement
 
-- Default spacing: 150 mm center-to-center.
-- Global sensor offsets from bar center (mm): `[-300, -150, 0, 150, 300]`.
+- Default spacing: 120 mm center-to-center.
+- Global sensor offsets from bar center (mm): `[-240, -120, 0, 120, 240]`.
 - Keep all modules parallel and rigidly fixed to the same horizontal bar.

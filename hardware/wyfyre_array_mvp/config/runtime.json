@@ -9,12 +9,15 @@
     "serial_fallback": {
       "enabled": true,
       "ports": {
-        "A": "COM7"
+        "A": "AUTO"
       },
       "baud": 115200
     }
   },
   "fusion": {
+    "coordinate_convention": {
+      "local_y_sign": -1
+    },
     "cluster_radius_mm": 380,
     "track_match_radius_mm": 450,
     "track_timeout_ms": 1400,

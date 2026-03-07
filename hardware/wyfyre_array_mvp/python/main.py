@@ -46,6 +46,7 @@ class WyFyreArrayApp:
 
         self.raw_buffer: list[RawDetection] = []
         self.node_last_seen: dict[str, int] = {}
+        self._timestamp_note_shown: set[str] = set()
         self.max_buffer_age_ms = 350
 
         self.logger = DatasetLogger(
@@ -115,6 +116,13 @@ class WyFyreArrayApp:
         self.log_widget.pack(fill="both", expand=True)
         self.log_widget.configure(state="disabled")
 
+        raw = ttk.LabelFrame(left, text="Raw serial", padding=8)
+        raw.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
+        left.rowconfigure(3, weight=1)
+        self.raw_widget = tk.Text(raw, height=10, width=42, wrap="none")
+        self.raw_widget.pack(fill="both", expand=True)
+        self.raw_widget.configure(state="disabled")
+
         fig = Figure(figsize=(12, 6), dpi=100)
         self.ax_raw = fig.add_subplot(131)
         self.ax_fused = fig.add_subplot(132)
@@ -131,7 +139,7 @@ class WyFyreArrayApp:
         self.heatmap_img = self.ax_heat.imshow(
             np.zeros((10, 10)),
             origin="lower",
-            extent=[-3000, 3000, 0, 6000],
+            extent=(-3000.0, 3000.0, 0.0, 6000.0),
             cmap="inferno",
             vmin=0,
             vmax=1,
@@ -182,13 +190,18 @@ class WyFyreArrayApp:
             if pkt is None:
                 return
 
+            raw_line = getattr(pkt, "raw_line", "")
+            if raw_line:
+                self._log_raw(raw_line)
+
             data = pkt.data
             msg = data.get("msg")
             node_id = data.get("node_id", "?")
 
             if msg == "detections":
                 self.node_last_seen[node_id] = int(time.time() * 1000)
-                timestamp_ms = int(data.get("timestamp_ms", int(time.time() * 1000)))
+                receipt_ms = int(time.time() * 1000)
+                source_ts = int(data.get("timestamp_ms", 0))
                 for det in data.get("detections", []):
                     try:
                         self.raw_buffer.append(
@@ -196,7 +209,7 @@ class WyFyreArrayApp:
                                 node_id=node_id,
                                 sensor_id=str(det.get("sensor_id")),
                                 sensor_index=int(det.get("sensor_index", -1)),
-                                timestamp_ms=timestamp_ms,
+                                timestamp_ms=receipt_ms,
                                 target_id=int(det.get("target_id", -1)),
                                 x_mm=int(det.get("x_mm", 0)),
                                 y_mm=int(det.get("y_mm", 0)),
@@ -207,6 +220,9 @@ class WyFyreArrayApp:
                         )
                     except Exception:
                         continue
+                if source_ts and source_ts < 1000000 and node_id not in self._timestamp_note_shown:
+                    self._log(f"Node {node_id}: using host timestamp for aging (source_ts={source_ts})")
+                    self._timestamp_note_shown.add(node_id)
             else:
                 self._log(f"Node {node_id}: {json.dumps(data, separators=(',', ':'))}")
 
@@ -314,6 +330,16 @@ class WyFyreArrayApp:
             self.log_widget.delete("1.0", f"{line_count - keep}.0")
         self.log_widget.see("end")
         self.log_widget.configure(state="disabled")
+
+    def _log_raw(self, msg: str) -> None:
+        self.raw_widget.configure(state="normal")
+        self.raw_widget.insert("end", msg + "\n")
+        keep = int(self.config.runtime["app"].get("log_keep_lines", 500))
+        line_count = int(self.raw_widget.index("end-1c").split(".")[0])
+        if line_count > keep:
+            self.raw_widget.delete("1.0", f"{line_count - keep}.0")
+        self.raw_widget.see("end")
+        self.raw_widget.configure(state="disabled")
 
     def shutdown(self) -> None:
         self.receiver.stop()

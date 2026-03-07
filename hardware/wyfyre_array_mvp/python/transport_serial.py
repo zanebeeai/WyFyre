@@ -8,12 +8,15 @@ from queue import Empty, Queue
 from typing import Optional
 
 import serial
+from serial.tools import list_ports
 
 
 @dataclass(frozen=True)
 class SerialPacket:
     node_id: str
     data: dict
+    raw_line: str = ""
+    parsed: bool = True
 
 
 class SerialNodeReceiver:
@@ -47,27 +50,88 @@ class SerialNodeReceiver:
         self._serial_by_node.clear()
 
     def _reader_loop(self, node_id: str, port: str) -> None:
+        active_port = port
         while self._running.is_set():
             try:
-                ser = serial.Serial(port, self.baud, timeout=0.2)
+                if active_port.strip().upper() == "AUTO":
+                    ser, resolved_port = self._open_auto_port(node_id)
+                    if ser is None:
+                        time.sleep(0.7)
+                        continue
+                    active_port = resolved_port
+                else:
+                    ser = serial.Serial(active_port, self.baud, timeout=0.2)
+
                 self._serial_by_node[node_id] = ser
                 while self._running.is_set():
                     line = ser.readline()
                     if not line:
                         continue
-                    try:
-                        payload = json.loads(line.decode("utf-8").strip())
-                    except (UnicodeDecodeError, json.JSONDecodeError):
+                    text = line.decode("utf-8", errors="replace").strip()
+                    if not text:
                         continue
+                    try:
+                        payload = json.loads(text)
+                        packet = SerialPacket(node_id=node_id, data=payload, raw_line=text, parsed=True)
+                    except json.JSONDecodeError:
+                        payload = {"msg": "raw_serial", "node_id": node_id, "raw_line": text}
+                        packet = SerialPacket(node_id=node_id, data=payload, raw_line=text, parsed=False)
 
                     if self._queue.full():
                         try:
                             self._queue.get_nowait()
                         except Empty:
                             pass
-                    self._queue.put(SerialPacket(node_id=node_id, data=payload))
+                    self._queue.put(packet)
             except serial.SerialException:
+                if node_id in self._serial_by_node:
+                    self._serial_by_node.pop(node_id, None)
+                if port.strip().upper() == "AUTO":
+                    active_port = "AUTO"
                 time.sleep(0.7)
+
+    def _open_auto_port(self, node_id: str) -> tuple[Optional[serial.Serial], str]:
+        ports = [p.device for p in list_ports.comports()]
+        for candidate in ports:
+            try:
+                ser = serial.Serial(candidate, self.baud, timeout=0.2)
+            except serial.SerialException:
+                continue
+
+            start = time.time()
+            matched = False
+            while (time.time() - start) < 1.2:
+                line = ser.readline()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line.decode("utf-8").strip())
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+
+                if payload.get("node_id") == node_id:
+                    if self._queue.full():
+                        try:
+                            self._queue.get_nowait()
+                        except Empty:
+                            pass
+                    self._queue.put(
+                        SerialPacket(
+                            node_id=node_id,
+                            data=payload,
+                            raw_line=json.dumps(payload, separators=(",", ":")),
+                            parsed=True,
+                        )
+                    )
+                    matched = True
+                    break
+
+            if matched:
+                return ser, candidate
+
+            ser.close()
+
+        return None, "AUTO"
 
     def pop(self) -> Optional[SerialPacket]:
         try:

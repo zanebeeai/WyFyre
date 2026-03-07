@@ -23,14 +23,16 @@ This stage uses a 5-sensor horizontal bar and solves the UART0/USB conflict by m
 
 ## 2) Physical Topology
 
-Default bar geometry (mm):
+Default bar geometry (mm), 120 mm spacing:
 
-- `S0=-300`, `S1=-150`, `S2=0`, `S3=+150`, `S4=+300`
+- `S0=-240`, `S1=-120`, `S2=0`, `S3=+120`, `S4=+240`
 
 Node split:
 
 - Node A: `S0,S1`
 - Node B: `S2,S3,S4`
+
+Sensor order convention when facing outward from the bar: `S0` is leftmost, `S4` is rightmost.
 
 Why this split:
 
@@ -43,14 +45,14 @@ Full details: `docs/wiring.md`
 
 Node A:
 
-- `S0`: GPIO16 RX, GPIO17 TX
-- `S1`: GPIO18 RX, GPIO19 TX
+- `S0` on UART2: GPIO18 RX, GPIO19 TX
+- `S1` on UART1: GPIO16 RX, GPIO17 TX
 
 Node B:
 
-- `S2`: GPIO4 RX, GPIO5 TX
-- `S3`: GPIO16 RX, GPIO17 TX
-- `S4`: GPIO18 RX, GPIO19 TX
+- `S2` on UART1: GPIO16 RX, GPIO17 TX
+- `S3` on UART2: GPIO18 RX, GPIO19 TX
+- `S4` on UART0 (remapped): GPIO4 RX, GPIO5 TX
 
 Always:
 
@@ -90,13 +92,15 @@ pip install -r requirements.txt
 Edit `config/runtime.json`:
 
 - `transport.mode` should be `"serial"`
-- `transport.serial_fallback.ports.A` should match Node A COM port (example `COM7`)
+- `transport.serial_fallback.ports.A` can stay `"AUTO"` (default auto-detect), or set explicit COM port (example `"COM7"`)
 
 Run:
 
 ```bash
 python main.py
 ```
+
+Important: close Arduino Serial Monitor or any other terminal on Node A COM port before running `main.py`.
 
 ## 7) Normal Operation (Start to Finish)
 
@@ -113,6 +117,12 @@ Command path in this architecture:
 
 - Host sends mode command to Node A.
 - Node A applies mode locally and forwards mode to Node B via ESP-NOW.
+
+Coordinate note:
+
+- LD2450 telemetry commonly reports forward range as negative Y in raw packets.
+- Host fusion applies `fusion.coordinate_convention.local_y_sign` from `config/runtime.json` (default `-1`) so forward appears as positive Y in the UI.
+- ESP nodes send uptime-based `timestamp_ms`; host uses receipt time for frame aging to avoid stale-frame drops.
 
 ## 8) Calibration Workflow
 
@@ -147,6 +157,8 @@ The framework is ready for aligned CV/radar capture:
 - No detections at all: check UART cross wiring and common ground.
 - Flicker/noise: improve power rail stability and cable routing.
 - Mode command inconsistent: resend `Set on nodes` from app; A forwards to B.
+- Use the `Raw serial` panel in the app to verify incoming JSON lines from Node A and isolate parser/display issues.
+- If raw lines show targets but plots look empty, verify `fusion.coordinate_convention.local_y_sign` is `-1`.
 
 ## 12) Known Limits (Current MVP)
 

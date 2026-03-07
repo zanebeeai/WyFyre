@@ -5,7 +5,7 @@ static const char* NODE_ID = "B";
 static const uint32_t SERIAL_BAUD = 115200;
 static const uint32_t RADAR_BAUD = 256000;
 
-static const uint8_t PEER_A_MAC[6] = {0x24, 0x6F, 0x28, 0x11, 0x22, 0x33};
+static const uint8_t PEER_A_MAC[6] = {0xB0, 0xB2, 0x1C, 0xC1, 0xA3, 0x6C};
 
 static const uint16_t REPORT_FRAME_SIZE = 30;
 static const uint8_t REPORT_HEADER[4] = {0xAA, 0xFF, 0x03, 0x00};
@@ -71,10 +71,10 @@ struct __attribute__((packed)) EspNowCommand {
 HardwareSerial sensorUart0(0);
 HardwareSerial sensorUart1(1);
 HardwareSerial sensorUart2(2);
-HardwareSerial* SENSOR_UARTS[3] = {&sensorUart0, &sensorUart1, &sensorUart2};
+HardwareSerial* SENSOR_UARTS[3] = {&sensorUart1, &sensorUart2, &sensorUart0};
 static const uint8_t SENSOR_GLOBAL_INDEX[3] = {2, 3, 4};
-static const int RX_PINS[3] = {4, 16, 18};
-static const int TX_PINS[3] = {5, 17, 19};
+static const int RX_PINS[3] = {16, 18, 4};
+static const int TX_PINS[3] = {17, 19, 5};
 
 SensorState sensorState[3];
 TrackMode desiredMode = TRACK_MULTI;

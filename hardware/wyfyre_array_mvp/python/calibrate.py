@@ -14,6 +14,7 @@ from transport_udp import UdpNodeReceiver
 
 def run_calibration(project_root: Path, duration_s: float, expected_x_mm: float, expected_y_mm: float) -> None:
     cfg = ConfigBundle(project_root)
+    local_y_sign = float(cfg.runtime.get("fusion", {}).get("coordinate_convention", {}).get("local_y_sign", -1))
 
     if cfg.runtime["transport"]["mode"] == "serial":
         serial_cfg = cfg.runtime["transport"]["serial_fallback"]
@@ -61,7 +62,7 @@ def run_calibration(project_root: Path, duration_s: float, expected_x_mm: float,
                     continue
                 sx, sy = cfg.sensor_offset(det.sensor_id)
                 gx = sx + det.x_mm
-                gy = sy + det.y_mm
+                gy = sy + local_y_sign * det.y_mm
                 if abs(gy - expected_y_mm) > 1500:
                     continue
                 per_sensor_global_x.setdefault(det.sensor_id, []).append(gx)

@@ -5,7 +5,7 @@ static const char* NODE_ID = "A";
 static const uint32_t SERIAL_BAUD = 115200;
 static const uint32_t RADAR_BAUD = 256000;
 
-static const uint8_t PEER_B_MAC[6] = {0x24, 0x6F, 0x28, 0xAA, 0xBB, 0xCC};
+static const uint8_t PEER_B_MAC[6] = {0xE4, 0x65, 0xB8, 0x4A, 0x19, 0x7C};
 
 static const uint16_t REPORT_FRAME_SIZE = 30;
 static const uint8_t REPORT_HEADER[4] = {0xAA, 0xFF, 0x03, 0x00};
@@ -70,11 +70,11 @@ struct __attribute__((packed)) EspNowCommand {
 
 HardwareSerial sensorUart1(1);
 HardwareSerial sensorUart2(2);
-HardwareSerial* SENSOR_UARTS[2] = {&sensorUart1, &sensorUart2};
+HardwareSerial* SENSOR_UARTS[2] = {&sensorUart2, &sensorUart1};
 static const char* SENSOR_IDS[2] = {"S0", "S1"};
 static const uint8_t SENSOR_GLOBAL_INDEX[2] = {0, 1};
-static const int RX_PINS[2] = {16, 18};
-static const int TX_PINS[2] = {17, 19};
+static const int RX_PINS[2] = {18, 16};
+static const int TX_PINS[2] = {19, 17};
 
 SensorState sensorState[2];
 EspNowTelemetry latestRemoteTelemetry;

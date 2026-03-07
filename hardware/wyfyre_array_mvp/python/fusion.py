@@ -16,6 +16,8 @@ class FusionEngine:
         self.cv_feedback = cv_feedback or CvFeedbackAdapter()
 
         fusion_cfg = self.config.runtime["fusion"]
+        coord_cfg = fusion_cfg.get("coordinate_convention", {})
+        self.local_y_sign = float(coord_cfg.get("local_y_sign", -1))
         self.cluster_radius_mm = float(fusion_cfg["cluster_radius_mm"])
         self.track_match_radius_mm = float(fusion_cfg["track_match_radius_mm"])
         self.track_timeout_ms = int(fusion_cfg["track_timeout_ms"])
@@ -69,7 +71,7 @@ class FusionEngine:
         sx, sy = self.config.sensor_offset(det.sensor_id)
         bx, by = self.config.sensor_bias_offset(det.sensor_id)
         gx = sx + float(det.x_mm) + bx
-        gy = sy + float(det.y_mm) + by
+        gy = sy + self.local_y_sign * float(det.y_mm) + by
         angle_deg = math.degrees(math.atan2(gx, max(1.0, gy)))
         return GlobalDetection(
             raw=det,

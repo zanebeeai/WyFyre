@@ -1,12 +1,12 @@
 {
   "bar_name": "wyfyre_horizontal_5",
   "units": "mm",
-  "default_spacing_mm": 150,
+  "default_spacing_mm": 120,
   "sensors": [
     {
       "sensor_id": "S0",
       "enabled": true,
-      "x_offset_mm": -300,
+      "x_offset_mm": -240,
       "y_offset_mm": 0,
       "yaw_deg": 0,
       "weight": 1.0,
@@ -15,7 +15,7 @@
     {
       "sensor_id": "S1",
       "enabled": true,
-      "x_offset_mm": -150,
+      "x_offset_mm": -120,
       "y_offset_mm": 0,
       "yaw_deg": 0,
       "weight": 1.0,
@@ -33,7 +33,7 @@
     {
       "sensor_id": "S3",
       "enabled": true,
-      "x_offset_mm": 150,
+      "x_offset_mm": 120,
       "y_offset_mm": 0,
       "yaw_deg": 0,
       "weight": 1.0,
@@ -42,7 +42,7 @@
     {
       "sensor_id": "S4",
       "enabled": true,
-      "x_offset_mm": 300,
+      "x_offset_mm": 240,
       "y_offset_mm": 0,
       "yaw_deg": 0,
       "weight": 1.0,
