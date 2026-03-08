@@ -2,6 +2,10 @@
   "bar_name": "wyfyre_horizontal_5",
   "units": "mm",
   "default_spacing_mm": 120,
+  "radar": {
+    "max_range_mm": 6000,
+    "azimuth_half_deg": 60
+  },
   "sensors": [
     {
       "sensor_id": "S0",

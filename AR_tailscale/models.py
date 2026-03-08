@@ -57,6 +57,7 @@ class TrackState:
 class FusionResult:
     timestamp_ms: int
     global_detections: list[GlobalDetection]
+    rejected_near_detections: list[GlobalDetection]
     fused_targets: list[FusedTarget]
     heatmap: Any
     heatmap_extent: tuple[float, float, float, float]

@@ -22,6 +22,7 @@
     "track_match_radius_mm": 450,
     "track_timeout_ms": 1400,
     "single_target_min_confidence": 0.2,
+    "min_valid_range_mm": 450,
     "heatmap": {
       "x_min_mm": -3000,
       "x_max_mm": 3000,

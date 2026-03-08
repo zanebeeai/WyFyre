@@ -16,6 +16,7 @@ This folder is a full AR bridge that:
   - 3D target pings at fused target positions
   - top-right confidence radar/minimap heatmap
   - yaw-only world transform (pitch ignored), per your requirement
+  - inferno-style heat coloring with radar range/FOV from `config/geometry.json`
 
 ## Setup
 
@@ -32,6 +33,8 @@ pip install -r requirements.txt
 - Most setups can keep:
   - `transport.mode = "serial"`
   - `transport.serial_fallback.ports.A = "AUTO"`
+- For near-field false positives, tune:
+  - `fusion.min_valid_range_mm` (default `450`)
 
 3) Start server
 

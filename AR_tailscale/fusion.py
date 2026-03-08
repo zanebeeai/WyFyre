@@ -32,8 +32,10 @@ class FusionEngine:
         self.hm_cell = float(hm_cfg["cell_size_mm"])
         self.hm_sigma = float(hm_cfg["gaussian_sigma_mm"])
         self.hm_alpha = float(hm_cfg["temporal_alpha"])
-        self.max_range_mm = 6000.0
-        self.azimuth_half_deg = 60.0
+        radar_cfg = self.config.geometry.get("radar", {})
+        self.max_range_mm = float(radar_cfg.get("max_range_mm", 6000.0))
+        self.azimuth_half_deg = float(radar_cfg.get("azimuth_half_deg", 60.0))
+        self.min_valid_range_mm = float(fusion_cfg.get("min_valid_range_mm", 350.0))
 
         self.x_grid = np.arange(self.hm_x_min, self.hm_x_max + self.hm_cell, self.hm_cell)
         self.y_grid = np.arange(self.hm_y_min, self.hm_y_max + self.hm_cell, self.hm_cell)
@@ -45,10 +47,20 @@ class FusionEngine:
         self.next_track_id = 1
 
     def process(self, raw_detections: list[RawDetection], timestamp_ms: int, mode: str) -> FusionResult:
-        global_detections = [
+        all_global_detections = [
             self._to_global(d)
             for d in raw_detections
             if d.active and self.config.sensor_enabled(d.sensor_id)
+        ]
+        rejected_near_detections = [
+            d
+            for d in all_global_detections
+            if math.hypot(d.global_x_mm, d.global_y_mm) < self.min_valid_range_mm
+        ]
+        global_detections = [
+            d
+            for d in all_global_detections
+            if math.hypot(d.global_x_mm, d.global_y_mm) >= self.min_valid_range_mm
         ]
         clusters = self._cluster_detections(global_detections)
         fused_targets = self._fuse_clusters(clusters, timestamp_ms)
@@ -65,6 +77,7 @@ class FusionEngine:
         return FusionResult(
             timestamp_ms=timestamp_ms,
             global_detections=global_detections,
+            rejected_near_detections=rejected_near_detections,
             fused_targets=fused_targets,
             heatmap=heatmap,
             heatmap_extent=extent,

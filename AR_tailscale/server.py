@@ -166,13 +166,11 @@ class RadarFusionBridge:
 
     def _build_frame(self, result, now_ms: int) -> dict:
         heat = np.nan_to_num(result.heatmap, nan=0.0, posinf=0.0, neginf=0.0)
-        heat_peak = float(np.max(heat)) if heat.size else 0.0
-        if heat_peak > 1e-6:
-            heat_norm = np.clip((heat / heat_peak) * 255.0, 0, 255).astype(np.uint8)
-        else:
-            heat_norm = np.zeros_like(heat, dtype=np.uint8)
+        heat_clipped = np.clip(heat, 0.0, 1.0)
+        heat_peak = float(np.max(heat_clipped)) if heat_clipped.size else 0.0
+        heat_u8 = np.clip(heat_clipped * 255.0, 0, 255).astype(np.uint8)
 
-        heat_blob = base64.b64encode(heat_norm.tobytes()).decode("ascii")
+        heat_blob = base64.b64encode(heat_u8.tobytes()).decode("ascii")
         fused_targets = [
             {
                 "track_id": t.track_id,
@@ -185,6 +183,14 @@ class RadarFusionBridge:
                 "persistence": t.persistence,
             }
             for t in result.fused_targets
+        ]
+        rejected_near = [
+            {
+                "x_mm": d.global_x_mm,
+                "y_mm": d.global_y_mm,
+                "sensor_id": d.raw.sensor_id,
+            }
+            for d in result.rejected_near_detections
         ]
 
         expected_nodes = self.config.runtime["transport"].get("expected_nodes", ["A", "B"])
@@ -201,9 +207,15 @@ class RadarFusionBridge:
             "timestamp_ms": now_ms,
             "receiver_mode": self.receiver_mode,
             "fused_targets": fused_targets,
+            "radar": {
+                "max_range_mm": self.fusion.max_range_mm,
+                "azimuth_half_deg": self.fusion.azimuth_half_deg,
+                "min_valid_range_mm": self.fusion.min_valid_range_mm,
+            },
+            "rejected_near": rejected_near,
             "heatmap": {
-                "width": int(heat_norm.shape[1]),
-                "height": int(heat_norm.shape[0]),
+                "width": int(heat_u8.shape[1]),
+                "height": int(heat_u8.shape[0]),
                 "extent": {
                     "x_min_mm": result.heatmap_extent[0],
                     "x_max_mm": result.heatmap_extent[1],

@@ -146,8 +146,10 @@
     const targetSlots = [];
     const slotByTrackId = new Map();
     const latestTargetPoints = [];
+    const latestRejectedPoints = [];
     let latestHeatmap = null;
     let latestExtent = null;
+    let radarConfig = { maxRangeMm: 6000, azimuthHalfDeg: 60, minValidRangeMm: 450 };
 
     function makeTargetSlot(i) {
       const root = new BABYLON.TransformNode(`target_${i}`, scene);
@@ -242,6 +244,7 @@
       const nowMs = Date.now();
       const targets = frame.fused_targets || [];
       latestTargetPoints.length = 0;
+      latestRejectedPoints.length = 0;
 
       for (const t of targets.slice(0, MAX_RENDERED_TARGETS)) {
         let slot = slotByTrackId.get(t.track_id);
@@ -260,6 +263,10 @@
         slot.targetPos.copyFrom(sensorPointToWorld(t.x_mm, t.y_mm));
         slot.lastSeenMs = nowMs;
         latestTargetPoints.push({ x_mm: t.x_mm, y_mm: t.y_mm, confidence: slot.confidence });
+      }
+
+      for (const d of (frame.rejected_near || [])) {
+        latestRejectedPoints.push({ x_mm: d.x_mm, y_mm: d.y_mm });
       }
 
       releaseStaleSlots(nowMs);
@@ -287,6 +294,11 @@
       if (!frame.heatmap || !frame.heatmap.u8_b64) {
         return;
       }
+      if (frame.radar) {
+        radarConfig.maxRangeMm = frame.radar.max_range_mm || radarConfig.maxRangeMm;
+        radarConfig.azimuthHalfDeg = frame.radar.azimuth_half_deg || radarConfig.azimuthHalfDeg;
+        radarConfig.minValidRangeMm = frame.radar.min_valid_range_mm || radarConfig.minValidRangeMm;
+      }
       latestHeatmap = {
         width: frame.heatmap.width,
         height: frame.heatmap.height,
@@ -306,12 +318,53 @@
       const maxR = h * 0.73;
 
       const angle = Math.atan2(xMm, Math.max(1, yMm));
-      const distNorm = Math.min(1, Math.sqrt((xMm * xMm + yMm * yMm)) / 6000);
+      const distNorm = Math.min(1, Math.sqrt((xMm * xMm + yMm * yMm)) / radarConfig.maxRangeMm);
       const r = distNorm * maxR;
       return {
         x: cx + Math.sin(angle) * r,
         y: cy - Math.cos(angle) * r,
       };
+    }
+
+    function radarAngles() {
+      const half = (radarConfig.azimuthHalfDeg * Math.PI) / 180;
+      return {
+        start: (-Math.PI * 0.5) - half,
+        end: (-Math.PI * 0.5) + half,
+      };
+    }
+
+    function pointInRadarFov(xMm, yMm) {
+      const angleDeg = Math.abs(Math.atan2(xMm, Math.max(1, yMm)) * (180 / Math.PI));
+      const rangeMm = Math.sqrt((xMm * xMm) + (yMm * yMm));
+      return angleDeg <= radarConfig.azimuthHalfDeg && rangeMm <= radarConfig.maxRangeMm;
+    }
+
+    function infernoColor(v255) {
+      const t = Math.max(0, Math.min(1, v255 / 255));
+      const stops = [
+        [0.00, [0, 0, 4]],
+        [0.18, [31, 12, 72]],
+        [0.36, [85, 15, 109]],
+        [0.54, [136, 34, 106]],
+        [0.72, [186, 54, 85]],
+        [0.86, [227, 89, 51]],
+        [0.94, [249, 140, 10]],
+        [1.00, [252, 255, 164]],
+      ];
+      for (let i = 1; i < stops.length; i += 1) {
+        const [t1, c1] = stops[i];
+        const [t0, c0] = stops[i - 1];
+        if (t <= t1) {
+          const k = (t - t0) / Math.max(1e-6, (t1 - t0));
+          return {
+            r: Math.round(c0[0] + (c1[0] - c0[0]) * k),
+            g: Math.round(c0[1] + (c1[1] - c0[1]) * k),
+            b: Math.round(c0[2] + (c1[2] - c0[2]) * k),
+          };
+        }
+      }
+      return { r: 252, g: 255, b: 164 };
     }
 
     function drawRadarBase() {
@@ -320,6 +373,7 @@
       const cx = w * 0.5;
       const cy = h * 0.86;
       const maxR = h * 0.73;
+      const ang = radarAngles();
 
       radarCtx.clearRect(0, 0, w, h);
       radarCtx.fillStyle = "rgba(3,12,23,0.92)";
@@ -327,9 +381,9 @@
 
       radarCtx.beginPath();
       radarCtx.moveTo(cx, cy);
-      radarCtx.arc(cx, cy, maxR, Math.PI * (1 + 1/6), Math.PI * (2 - 1/6));
+      radarCtx.arc(cx, cy, maxR, ang.start, ang.end);
       radarCtx.closePath();
-      radarCtx.fillStyle = "rgba(24,78,118,0.2)";
+      radarCtx.fillStyle = "rgba(46,56,82,0.18)";
       radarCtx.fill();
 
       radarCtx.strokeStyle = "rgba(102,189,255,0.5)";
@@ -337,11 +391,16 @@
       for (let i = 1; i <= 6; i += 1) {
         const r = (maxR * i) / 6;
         radarCtx.beginPath();
-        radarCtx.arc(cx, cy, r, Math.PI * (1 + 1/6), Math.PI * (2 - 1/6));
+        radarCtx.arc(cx, cy, r, ang.start, ang.end);
         radarCtx.stroke();
+        const meters = Math.round((radarConfig.maxRangeMm * i) / 6 / 100) / 10;
+        radarCtx.fillStyle = "rgba(190, 210, 230, 0.65)";
+        radarCtx.font = "10px JetBrains Mono, Consolas, monospace";
+        radarCtx.fillText(`${meters}m`, cx + 6, cy - r - 3);
       }
 
-      [-60, -30, 0, 30, 60].forEach((deg) => {
+      const spread = radarConfig.azimuthHalfDeg;
+      [(-spread), (-spread / 2), 0, (spread / 2), spread].forEach((deg) => {
         const rad = (deg * Math.PI) / 180;
         const x = cx + Math.sin(rad) * maxR;
         const y = cy - Math.cos(rad) * maxR;
@@ -349,7 +408,22 @@
         radarCtx.moveTo(cx, cy);
         radarCtx.lineTo(x, y);
         radarCtx.stroke();
+        radarCtx.fillStyle = "rgba(190, 210, 230, 0.7)";
+        radarCtx.font = "10px JetBrains Mono, Consolas, monospace";
+        radarCtx.fillText(`${deg.toFixed(0)}deg`, x * 0.92 + cx * 0.08 - 14, y * 0.92 + cy * 0.08 - 2);
       });
+
+      const cutoffR = Math.min(maxR, (radarConfig.minValidRangeMm / Math.max(1, radarConfig.maxRangeMm)) * maxR);
+      radarCtx.beginPath();
+      radarCtx.setLineDash([5, 4]);
+      radarCtx.arc(cx, cy, cutoffR, ang.start, ang.end);
+      radarCtx.strokeStyle = "rgba(168, 168, 168, 0.9)";
+      radarCtx.lineWidth = 1.4;
+      radarCtx.stroke();
+      radarCtx.setLineDash([]);
+      radarCtx.fillStyle = "rgba(186, 186, 186, 0.95)";
+      radarCtx.font = "11px JetBrains Mono, Consolas, monospace";
+      radarCtx.fillText(`cutoff ${Math.round(radarConfig.minValidRangeMm)}mm`, cx + 10, cy - cutoffR - 8);
     }
 
     function drawHeatmapOnRadar() {
@@ -369,11 +443,15 @@
 
           const xMm = ex.x_min_mm + (col / (hm.width - 1)) * (ex.x_max_mm - ex.x_min_mm);
           const yMm = ex.y_min_mm + (row / (hm.height - 1)) * (ex.y_max_mm - ex.y_min_mm);
+          if (!pointInRadarFov(xMm, yMm)) {
+            continue;
+          }
           const p = radarToCanvas(xMm, yMm);
 
-          const alpha = Math.min(0.55, v / 255 * 0.7);
-          radarCtx.fillStyle = `rgba(${Math.round(255 * (v / 255))}, ${Math.round(200 * (v / 255))}, 50, ${alpha})`;
-          radarCtx.fillRect(p.x - 1.8, p.y - 1.8, 3.6, 3.6);
+          const c = infernoColor(v);
+          const alpha = Math.min(0.88, (v / 255) * 0.92);
+          radarCtx.fillStyle = `rgba(${c.r}, ${c.g}, ${c.b}, ${alpha})`;
+          radarCtx.fillRect(p.x - 2.0, p.y - 2.0, 4.0, 4.0);
         }
       }
     }
@@ -384,6 +462,14 @@
         radarCtx.beginPath();
         radarCtx.fillStyle = `rgba(126, 232, 255, ${0.5 + 0.5 * t.confidence})`;
         radarCtx.arc(p.x, p.y, 2 + 4 * t.confidence, 0, Math.PI * 2);
+        radarCtx.fill();
+      }
+
+      for (const d of latestRejectedPoints) {
+        const p = radarToCanvas(d.x_mm, d.y_mm);
+        radarCtx.beginPath();
+        radarCtx.fillStyle = "rgba(166, 166, 166, 0.9)";
+        radarCtx.arc(p.x, p.y, 2.2, 0, Math.PI * 2);
         radarCtx.fill();
       }
     }
