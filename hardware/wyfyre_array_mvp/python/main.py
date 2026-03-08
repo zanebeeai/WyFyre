@@ -9,6 +9,8 @@ from tkinter import ttk
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+from matplotlib.patches import Arc, Wedge
+from matplotlib import cm
 
 from config_loader import ConfigBundle
 from cv_feedback import CvFeedbackAdapter
@@ -27,6 +29,12 @@ SENSOR_COLORS = {
     "S3": "#F97316",
     "S4": "#EF4444",
 }
+
+RADAR_MAX_RANGE_MM = 6000
+RADAR_AZIMUTH_DEG = 60
+RADAR_X_LIMIT_MM = int(RADAR_MAX_RANGE_MM * np.sin(np.deg2rad(RADAR_AZIMUTH_DEG))) + 400
+RADAR_Y_MIN_MM = -300
+RADAR_Y_MAX_MM = RADAR_MAX_RANGE_MM + 250
 
 
 class WyFyreArrayApp:
@@ -47,6 +55,14 @@ class WyFyreArrayApp:
         self.raw_buffer: list[RawDetection] = []
         self.node_last_seen: dict[str, int] = {}
         self._timestamp_note_shown: set[str] = set()
+        self.remote_link_ms: int | None = None
+        self.remote_drop_count: int = 0
+        self.remote_rx_count: int = 0
+        self.remote_sensor_frame_mask: int | None = None
+        self.remote_sensor_active_mask: int | None = None
+        self.local_sensor_frame_mask: int | None = None
+        self.local_sensor_active_mask: int | None = None
+        self.sensor_active_counts: dict[str, int] = {f"S{i}": 0 for i in range(5)}
         self.max_buffer_age_ms = 350
 
         self.logger = DatasetLogger(
@@ -123,27 +139,27 @@ class WyFyreArrayApp:
         self.raw_widget.pack(fill="both", expand=True)
         self.raw_widget.configure(state="disabled")
 
-        fig = Figure(figsize=(12, 6), dpi=100)
-        self.ax_raw = fig.add_subplot(131)
-        self.ax_fused = fig.add_subplot(132)
-        self.ax_heat = fig.add_subplot(133)
+        fig = Figure(figsize=(12, 8), dpi=100)
+        grid = fig.add_gridspec(2, 2, height_ratios=[1.0, 1.8], hspace=0.22, wspace=0.18)
+        self.ax_raw = fig.add_subplot(grid[0, 0])
+        self.ax_fused = fig.add_subplot(grid[0, 1])
+        self.ax_heat = fig.add_subplot(grid[1, :])
 
-        for ax, title in ((self.ax_raw, "Raw per-sensor"), (self.ax_fused, "Fused targets"), (self.ax_heat, "Confidence heatmap")):
-            ax.set_title(title)
-            ax.set_xlim(-3000, 3000)
-            ax.set_ylim(0, 6000)
-            ax.set_xlabel("X [mm]")
-            ax.set_ylabel("Y [mm]")
-            ax.grid(alpha=0.25)
+        self._style_radar_axis(self.ax_raw, "Raw per-sensor")
+        self._style_radar_axis(self.ax_fused, "Fused targets")
+        self._style_radar_axis(self.ax_heat, "Confidence heatmap")
 
+        heat_cmap = cm.get_cmap("inferno").copy()
+        heat_cmap.set_bad((0.0, 0.0, 0.0, 0.0))
         self.heatmap_img = self.ax_heat.imshow(
             np.zeros((10, 10)),
             origin="lower",
             extent=(-3000.0, 3000.0, 0.0, 6000.0),
-            cmap="inferno",
+            cmap=heat_cmap,
             vmin=0,
             vmax=1,
             aspect="auto",
+            alpha=0.9,
         )
 
         self.canvas = FigureCanvasTkAgg(fig, master=right)
@@ -202,12 +218,30 @@ class WyFyreArrayApp:
                 self.node_last_seen[node_id] = int(time.time() * 1000)
                 receipt_ms = int(time.time() * 1000)
                 source_ts = int(data.get("timestamp_ms", 0))
+                per_sensor_counts = {f"S{i}": 0 for i in range(5)}
+                if node_id == "A":
+                    if "remote_link_ms" in data:
+                        self.remote_link_ms = int(data.get("remote_link_ms", 0))
+                    self.remote_drop_count = int(data.get("remote_drop_count", self.remote_drop_count))
+                    self.remote_rx_count = int(data.get("remote_rx_count", self.remote_rx_count))
+                    if "local_sensor_frame_mask" in data:
+                        self.local_sensor_frame_mask = int(data.get("local_sensor_frame_mask", 0))
+                    if "local_sensor_active_mask" in data:
+                        self.local_sensor_active_mask = int(data.get("local_sensor_active_mask", 0))
+                    if "remote_sensor_frame_mask" in data:
+                        self.remote_sensor_frame_mask = int(data.get("remote_sensor_frame_mask", 0))
+                    if "remote_sensor_active_mask" in data:
+                        self.remote_sensor_active_mask = int(data.get("remote_sensor_active_mask", 0))
                 for det in data.get("detections", []):
                     try:
+                        sid = str(det.get("sensor_id"))
+                        is_active = bool(det.get("active", False))
+                        if sid in per_sensor_counts and is_active:
+                            per_sensor_counts[sid] += 1
                         self.raw_buffer.append(
                             RawDetection(
                                 node_id=node_id,
-                                sensor_id=str(det.get("sensor_id")),
+                                sensor_id=sid,
                                 sensor_index=int(det.get("sensor_index", -1)),
                                 timestamp_ms=receipt_ms,
                                 target_id=int(det.get("target_id", -1)),
@@ -215,11 +249,12 @@ class WyFyreArrayApp:
                                 y_mm=int(det.get("y_mm", 0)),
                                 speed_cms=int(det.get("speed_cms", 0)),
                                 distance_resolution_mm=int(det.get("distance_resolution_mm", 0)),
-                                active=bool(det.get("active", False)),
+                                active=is_active,
                             )
                         )
                     except Exception:
                         continue
+                self.sensor_active_counts = per_sensor_counts
                 if source_ts and source_ts < 1000000 and node_id not in self._timestamp_note_shown:
                     self._log(f"Node {node_id}: using host timestamp for aging (source_ts={source_ts})")
                     self._timestamp_note_shown.add(node_id)
@@ -230,13 +265,8 @@ class WyFyreArrayApp:
         self.ax_raw.cla()
         self.ax_fused.cla()
 
-        for ax, title in ((self.ax_raw, "Raw per-sensor"), (self.ax_fused, "Fused targets")):
-            ax.set_title(title)
-            ax.set_xlim(-3000, 3000)
-            ax.set_ylim(0, 6000)
-            ax.set_xlabel("X [mm]")
-            ax.set_ylabel("Y [mm]")
-            ax.grid(alpha=0.25)
+        self._style_radar_axis(self.ax_raw, "Raw per-sensor")
+        self._style_radar_axis(self.ax_fused, "Fused targets")
 
         for sensor in self.config.geometry["sensors"]:
             sid = sensor["sensor_id"]
@@ -266,12 +296,58 @@ class WyFyreArrayApp:
         self.heatmap_img.set_data(result.heatmap)
         self.heatmap_img.set_extent(result.heatmap_extent)
         self.ax_heat.set_title("Confidence heatmap")
-        self.ax_heat.set_xlim(-3000, 3000)
-        self.ax_heat.set_ylim(0, 6000)
-        self.ax_heat.set_xlabel("X [mm]")
-        self.ax_heat.set_ylabel("Y [mm]")
+        self.ax_heat.set_xlim(-RADAR_X_LIMIT_MM, RADAR_X_LIMIT_MM)
+        self.ax_heat.set_ylim(RADAR_Y_MIN_MM, RADAR_Y_MAX_MM)
 
         self.canvas.draw_idle()
+
+    def _style_radar_axis(self, ax, title: str) -> None:
+        ax.set_title(title)
+        ax.set_xlim(-RADAR_X_LIMIT_MM, RADAR_X_LIMIT_MM)
+        ax.set_ylim(RADAR_Y_MIN_MM, RADAR_Y_MAX_MM)
+        ax.set_xlabel("X [mm]")
+        ax.set_ylabel("Y [mm]")
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(False)
+
+        sector = Wedge(
+            center=(0, 0),
+            r=RADAR_MAX_RANGE_MM,
+            theta1=30,
+            theta2=150,
+            facecolor="#dbeafe",
+            edgecolor="#93c5fd",
+            alpha=0.25,
+            linewidth=1.0,
+            zorder=0,
+        )
+        ax.add_patch(sector)
+
+        for meters in range(1, 7):
+            r = meters * 1000
+            ring = Arc(
+                (0, 0),
+                width=2 * r,
+                height=2 * r,
+                angle=0,
+                theta1=30,
+                theta2=150,
+                color="#60a5fa",
+                linewidth=0.9,
+                alpha=0.6,
+                zorder=1,
+            )
+            ax.add_patch(ring)
+            ax.text(65, r - 55, f"{meters}m", color="#1d4ed8", fontsize=7, zorder=2)
+
+        for angle in (-60, -30, 0, 30, 60):
+            theta = np.deg2rad(angle)
+            x = RADAR_MAX_RANGE_MM * np.sin(theta)
+            y = RADAR_MAX_RANGE_MM * np.cos(theta)
+            ax.plot([0, x], [0, y], color="#60a5fa", linewidth=0.8, alpha=0.55, zorder=1)
+            ax.text(x * 0.98, y * 0.98, f"{angle:+d}°", color="#1e3a8a", fontsize=7, ha="center", va="center", zorder=2)
+
+        ax.scatter([0], [0], marker="^", s=70, c="#0f172a", zorder=3)
 
     def _update_status_text(self, now_ms: int) -> None:
         lines = []
@@ -283,6 +359,21 @@ class WyFyreArrayApp:
             else:
                 age = now_ms - last
                 lines.append(f"Node {n}: online ({age} ms ago)")
+        if self.remote_link_ms is not None:
+            lines.append(
+                f"B->A ESP-NOW link: {self.remote_link_ms} ms, rx={self.remote_rx_count}, drops={self.remote_drop_count}"
+            )
+        if self.local_sensor_frame_mask is not None and self.local_sensor_active_mask is not None:
+            lines.append(
+                f"A frames mask={self.local_sensor_frame_mask} active mask={self.local_sensor_active_mask}"
+            )
+        if self.remote_sensor_frame_mask is not None and self.remote_sensor_active_mask is not None:
+            lines.append(
+                f"B frames mask={self.remote_sensor_frame_mask} active mask={self.remote_sensor_active_mask}"
+            )
+        lines.append(
+            "Active slots: " + ", ".join(f"{sid}={self.sensor_active_counts.get(sid, 0)}" for sid in ["S0", "S1", "S2", "S3", "S4"])
+        )
         self.node_status_var.set("\n".join(lines))
 
     def _toggle_logging(self) -> None:

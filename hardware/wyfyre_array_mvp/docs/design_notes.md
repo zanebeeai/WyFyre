@@ -14,6 +14,12 @@ Why this is the clean default after UART0 conflict review:
 - Node B can still run 3 sensors with UART0/1/2 and forward everything upstream.
 - Host app only needs one port (`Node A`).
 
+ESP-NOW implementation details:
+
+- Channel is pinned (`ESPNOW_CHANNEL`) on both nodes to avoid drift after reboots/flashes.
+- Packets include `magic` + `version` for safer parsing.
+- Node A always emits all 5 sensors to host JSON; if B is stale, `S2-S4` are emitted inactive.
+
 UDP receiver is still available in host code as an optional path for later networking experiments.
 
 ## Fusion scope

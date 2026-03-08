@@ -1,11 +1,14 @@
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 
 static const char* NODE_ID = "B";
-static const uint32_t SERIAL_BAUD = 115200;
 static const uint32_t RADAR_BAUD = 256000;
 
 static const uint8_t PEER_A_MAC[6] = {0xB0, 0xB2, 0x1C, 0xC1, 0xA3, 0x6C};
+static const uint8_t ESPNOW_CHANNEL = 1;
+static const uint16_t ESPNOW_MAGIC = 0x5759;
+static const uint8_t ESPNOW_VERSION = 1;
 
 static const uint16_t REPORT_FRAME_SIZE = 30;
 static const uint8_t REPORT_HEADER[4] = {0xAA, 0xFF, 0x03, 0x00};
@@ -42,6 +45,12 @@ struct SensorState {
   Detection targets[3];
 };
 
+struct __attribute__((packed)) EspNowHeader {
+  uint16_t magic;
+  uint8_t version;
+  uint8_t packet_type;
+};
+
 struct __attribute__((packed)) EspNowDetection {
   uint8_t sensor_global_index;
   uint8_t target_id;
@@ -53,15 +62,24 @@ struct __attribute__((packed)) EspNowDetection {
 };
 
 struct __attribute__((packed)) EspNowTelemetry {
+  uint16_t magic;
+  uint8_t version;
   uint8_t packet_type;
   uint8_t mode;
+  uint8_t reserved;
   uint32_t timestamp_ms;
   uint32_t seq;
+  uint32_t tx_ok;
+  uint32_t tx_fail;
+  uint8_t sensor_frame_mask;
+  uint8_t sensor_active_mask;
   uint8_t count;
   EspNowDetection detections[9];
 };
 
 struct __attribute__((packed)) EspNowCommand {
+  uint16_t magic;
+  uint8_t version;
   uint8_t packet_type;
   uint8_t command;
   uint8_t value;
@@ -73,16 +91,27 @@ HardwareSerial sensorUart1(1);
 HardwareSerial sensorUart2(2);
 HardwareSerial* SENSOR_UARTS[3] = {&sensorUart1, &sensorUart2, &sensorUart0};
 static const uint8_t SENSOR_GLOBAL_INDEX[3] = {2, 3, 4};
-static const int RX_PINS[3] = {16, 18, 4};
-static const int TX_PINS[3] = {17, 19, 5};
+static const int RX_PINS[3] = {26, 16, 3};
+static const int TX_PINS[3] = {25, 17, 1};
 
 SensorState sensorState[3];
 TrackMode desiredMode = TRACK_MULTI;
 uint32_t telemetrySeq = 1;
+uint32_t txOk = 0;
+uint32_t txFail = 0;
 
 int16_t decodeSigned15(uint16_t raw) {
   int16_t mag = raw & 0x7FFF;
   return (raw & 0x8000) ? -mag : mag;
+}
+
+void onEspNowSend(const uint8_t* mac, esp_now_send_status_t status) {
+  (void)mac;
+  if (status == ESP_NOW_SEND_SUCCESS) {
+    txOk++;
+  } else {
+    txFail++;
+  }
 }
 
 void sendCommandToSensor(HardwareSerial& uart, uint8_t cmdLo, uint8_t cmdHi) {
@@ -131,18 +160,10 @@ bool parseOneReportFrame(SensorState& state, HardwareSerial& uart) {
     }
     state.frame[state.fill++] = b;
 
-    if (state.fill == 1 && state.frame[0] != REPORT_HEADER[0]) {
-      state.fill = 0;
-    }
-    if (state.fill == 2 && state.frame[1] != REPORT_HEADER[1]) {
-      state.fill = 0;
-    }
-    if (state.fill == 3 && state.frame[2] != REPORT_HEADER[2]) {
-      state.fill = 0;
-    }
-    if (state.fill == 4 && state.frame[3] != REPORT_HEADER[3]) {
-      state.fill = 0;
-    }
+    if (state.fill == 1 && state.frame[0] != REPORT_HEADER[0]) state.fill = 0;
+    if (state.fill == 2 && state.frame[1] != REPORT_HEADER[1]) state.fill = 0;
+    if (state.fill == 3 && state.frame[2] != REPORT_HEADER[2]) state.fill = 0;
+    if (state.fill == 4 && state.frame[3] != REPORT_HEADER[3]) state.fill = 0;
 
     if (state.fill == REPORT_FRAME_SIZE) {
       if (state.frame[28] == REPORT_TAIL[0] && state.frame[29] == REPORT_TAIL[1]) {
@@ -170,14 +191,16 @@ bool parseOneReportFrame(SensorState& state, HardwareSerial& uart) {
 
 void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
   (void)mac;
-  if (len != static_cast<int>(sizeof(EspNowCommand))) {
+  if (len != static_cast<int>(sizeof(EspNowCommand)) || data == nullptr) {
     return;
   }
+
   EspNowCommand cmd;
   memcpy(&cmd, data, sizeof(cmd));
-  if (cmd.packet_type != PKT_COMMAND) {
+  if (cmd.magic != ESPNOW_MAGIC || cmd.version != ESPNOW_VERSION || cmd.packet_type != PKT_COMMAND) {
     return;
   }
+
   if (cmd.command == CMD_SET_MODE) {
     if (cmd.value == 1) {
       applyLocalMode(TRACK_SINGLE);
@@ -188,30 +211,53 @@ void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
 }
 
 void sendTelemetryToA() {
-  EspNowTelemetry pkt;
-  memset(&pkt, 0, sizeof(pkt));
+  EspNowTelemetry pkt = {};
+  pkt.magic = ESPNOW_MAGIC;
+  pkt.version = ESPNOW_VERSION;
   pkt.packet_type = PKT_TELEMETRY;
   pkt.mode = (desiredMode == TRACK_SINGLE) ? 1 : 2;
   pkt.timestamp_ms = millis();
   pkt.seq = telemetrySeq++;
+  pkt.tx_ok = txOk;
+  pkt.tx_fail = txFail;
+
+  uint8_t frameMask = 0;
+  uint8_t activeMask = 0;
 
   uint8_t outCount = 0;
   for (uint8_t s = 0; s < 3; ++s) {
-    if (!sensorState[s].have_last) {
-      continue;
+    if (sensorState[s].have_last) {
+      frameMask |= static_cast<uint8_t>(1U << s);
     }
+    bool sensorHasActive = false;
     for (uint8_t t = 0; t < 3 && outCount < 9; ++t) {
-      const Detection& d = sensorState[s].targets[t];
+      const Detection* d = nullptr;
+      Detection zero = {0, 0, 0, 0, false};
+      if (sensorState[s].have_last) {
+        d = &sensorState[s].targets[t];
+      } else {
+        d = &zero;
+      }
+      if (d->active) {
+        sensorHasActive = true;
+      }
+
       EspNowDetection& out = pkt.detections[outCount++];
       out.sensor_global_index = SENSOR_GLOBAL_INDEX[s];
       out.target_id = t;
-      out.x_mm = d.x_mm;
-      out.y_mm = d.y_mm;
-      out.speed_cms = d.speed_cms;
-      out.distance_resolution_mm = d.dist_res_mm;
-      out.active = d.active ? 1 : 0;
+      out.x_mm = d->x_mm;
+      out.y_mm = d->y_mm;
+      out.speed_cms = d->speed_cms;
+      out.distance_resolution_mm = d->dist_res_mm;
+      out.active = d->active ? 1 : 0;
+    }
+    if (sensorHasActive) {
+      activeMask |= static_cast<uint8_t>(1U << s);
     }
   }
+
+  pkt.sensor_frame_mask = frameMask;
+  pkt.sensor_active_mask = activeMask;
   pkt.count = outCount;
   esp_now_send(PEER_A_MAC, reinterpret_cast<const uint8_t*>(&pkt), sizeof(pkt));
 }
@@ -219,14 +265,20 @@ void sendTelemetryToA() {
 bool setupEspNow() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous(false);
+
   if (esp_now_init() != ESP_OK) {
     return false;
   }
+
   esp_now_register_recv_cb(onEspNowRecv);
+  esp_now_register_send_cb(onEspNowSend);
 
   esp_now_peer_info_t peerInfo = {};
   memcpy(peerInfo.peer_addr, PEER_A_MAC, 6);
-  peerInfo.channel = 0;
+  peerInfo.channel = ESPNOW_CHANNEL;
   peerInfo.encrypt = false;
   if (esp_now_add_peer(&peerInfo) != ESP_OK) {
     return false;
@@ -235,16 +287,13 @@ bool setupEspNow() {
 }
 
 void setup() {
-  Serial.begin(SERIAL_BAUD);
-
   SENSOR_UARTS[0]->begin(RADAR_BAUD, SERIAL_8N1, RX_PINS[0], TX_PINS[0]);
   SENSOR_UARTS[1]->begin(RADAR_BAUD, SERIAL_8N1, RX_PINS[1], TX_PINS[1]);
   SENSOR_UARTS[2]->begin(RADAR_BAUD, SERIAL_8N1, RX_PINS[2], TX_PINS[2]);
 
-  bool espOk = setupEspNow();
+  setupEspNow();
   delay(300);
   applyLocalMode(TRACK_MULTI);
-  Serial.printf("{\"msg\":\"boot\",\"node_id\":\"%s\",\"status\":\"%s\",\"mac\":\"%s\"}\n", NODE_ID, espOk ? "espnow_ok" : "espnow_fail", WiFi.macAddress().c_str());
 }
 
 void loop() {

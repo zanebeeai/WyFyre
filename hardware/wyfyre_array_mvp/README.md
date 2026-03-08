@@ -45,14 +45,14 @@ Full details: `docs/wiring.md`
 
 Node A:
 
-- `S0` on UART2: GPIO18 RX, GPIO19 TX
-- `S1` on UART1: GPIO16 RX, GPIO17 TX
+- `S0` on UART2: GPIO16 RX, GPIO17 TX
+- `S1` on UART1: GPIO26 RX, GPIO25 TX
 
 Node B:
 
-- `S2` on UART1: GPIO16 RX, GPIO17 TX
-- `S3` on UART2: GPIO18 RX, GPIO19 TX
-- `S4` on UART0 (remapped): GPIO4 RX, GPIO5 TX
+- `S2` on UART1: GPIO26 RX, GPIO25 TX
+- `S3` on UART2: GPIO16 RX, GPIO17 TX
+- `S4` on UART0 (default): GPIO3 RX, GPIO1 TX
 
 Always:
 
@@ -69,6 +69,7 @@ Node A and B firmware contain fixed peer MAC placeholders.
 3. Set constants:
    - in `firmware/esp32_array_node_a/esp32_array_node_a.ino`, set `PEER_B_MAC`
    - in `firmware/esp32_array_node_b/esp32_array_node_b.ino`, set `PEER_A_MAC`
+   - keep `ESPNOW_CHANNEL` equal on both sketches (default `1`)
 4. Reflash both boards.
 
 If MACs are wrong, `S2-S4` will not appear at host.
@@ -117,6 +118,25 @@ Command path in this architecture:
 
 - Host sends mode command to Node A.
 - Node A applies mode locally and forwards mode to Node B via ESP-NOW.
+
+ESP-NOW diagnostics:
+
+- Node A includes `remote_link_ms`, `remote_rx_count`, and `remote_drop_count` in telemetry.
+- Node A also includes `remote_sensor_frame_mask` and `remote_sensor_active_mask`.
+- Host status panel shows these values as `B->A ESP-NOW link`.
+- `S2-S4` are always present in host stream; if remote link is stale they are published as inactive.
+
+Mask decoding (B sensors only):
+
+- bit0 = `S2`, bit1 = `S3`, bit2 = `S4`
+- `remote_sensor_frame_mask`: parser has seen valid frames on that sensor UART
+- `remote_sensor_active_mask`: at least one active target currently on that sensor
+
+Mask decoding (A sensors):
+
+- bit0 = `S0`, bit1 = `S1`
+- `local_sensor_frame_mask`: parser has seen valid frames on A UARTs
+- `local_sensor_active_mask`: at least one active target currently on that sensor
 
 Coordinate note:
 

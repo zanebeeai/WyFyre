@@ -15,15 +15,15 @@ Facing outward from the bar, sensor ordering is left-to-right: `S0, S1, S2, S3, 
 
 ### ESP32_A (2 sensors + USB)
 
-- `S0` on UART2: ESP32 GPIO18 (RX) <- LD2450 TX, ESP32 GPIO19 (TX) -> LD2450 RX
-- `S1` on UART1: ESP32 GPIO16 (RX) <- LD2450 TX, ESP32 GPIO17 (TX) -> LD2450 RX
+- `S0` on UART2: ESP32 GPIO16 (RX) <- LD2450 TX, ESP32 GPIO17 (TX) -> LD2450 RX
+- `S1` on UART1: ESP32 GPIO26 (RX) <- LD2450 TX, ESP32 GPIO25 (TX) -> LD2450 RX
 - Keep UART0 for USB flashing + host serial data.
 
 ### ESP32_B (3 sensors, no host serial required)
 
-- `S2` on UART1: ESP32 GPIO16 (RX) <- LD2450 TX, ESP32 GPIO17 (TX) -> LD2450 RX
-- `S3` on UART2: ESP32 GPIO18 (RX) <- LD2450 TX, ESP32 GPIO19 (TX) -> LD2450 RX
-- `S4` on UART0 remapped: ESP32 GPIO4 (RX) <- LD2450 TX, ESP32 GPIO5 (TX) -> LD2450 RX
+- `S2` on UART1: ESP32 GPIO26 (RX) <- LD2450 TX, ESP32 GPIO25 (TX) -> LD2450 RX
+- `S3` on UART2: ESP32 GPIO16 (RX) <- LD2450 TX, ESP32 GPIO17 (TX) -> LD2450 RX
+- `S4` on UART0 default pins: ESP32 GPIO3 (RX) <- LD2450 TX, ESP32 GPIO1 (TX) -> LD2450 RX
 
 ## Power distribution
 
@@ -48,7 +48,13 @@ Facing outward from the bar, sensor ordering is left-to-right: `S0, S1, S2, S3, 
 
 - In `esp32_array_node_a.ino`, set `PEER_B_MAC` to Node B WiFi MAC.
 - In `esp32_array_node_b.ino`, set `PEER_A_MAC` to Node A WiFi MAC.
+- Keep `ESPNOW_CHANNEL` identical on both nodes (default `1`).
 - Capture each MAC from serial boot logs or by printing `WiFi.macAddress()` once.
+
+## ESP-NOW reliability notes
+
+- Node B runs without USB serial logging in normal mode (UART0 is assigned to `S4`).
+- Node A telemetry includes `remote_link_ms`, `remote_rx_count`, and `remote_drop_count` for quick link diagnostics in host UI.
 
 ## Mechanical placement
 

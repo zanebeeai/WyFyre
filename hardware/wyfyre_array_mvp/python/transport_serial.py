@@ -72,7 +72,15 @@ class SerialNodeReceiver:
                         continue
                     try:
                         payload = json.loads(text)
-                        packet = SerialPacket(node_id=node_id, data=payload, raw_line=text, parsed=True)
+                        if isinstance(payload, dict):
+                            packet = SerialPacket(node_id=node_id, data=payload, raw_line=text, parsed=True)
+                        else:
+                            packet = SerialPacket(
+                                node_id=node_id,
+                                data={"msg": "raw_serial", "node_id": node_id, "raw_line": text},
+                                raw_line=text,
+                                parsed=False,
+                            )
                     except json.JSONDecodeError:
                         payload = {"msg": "raw_serial", "node_id": node_id, "raw_line": text}
                         packet = SerialPacket(node_id=node_id, data=payload, raw_line=text, parsed=False)
@@ -104,9 +112,15 @@ class SerialNodeReceiver:
                 line = ser.readline()
                 if not line:
                     continue
+                text = line.decode("utf-8", errors="replace").strip()
+                if not text:
+                    continue
                 try:
-                    payload = json.loads(line.decode("utf-8").strip())
-                except (UnicodeDecodeError, json.JSONDecodeError):
+                    payload = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+
+                if not isinstance(payload, dict):
                     continue
 
                 if payload.get("node_id") == node_id:

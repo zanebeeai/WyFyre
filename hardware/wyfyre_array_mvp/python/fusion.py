@@ -32,11 +32,14 @@ class FusionEngine:
         self.hm_cell = float(hm_cfg["cell_size_mm"])
         self.hm_sigma = float(hm_cfg["gaussian_sigma_mm"])
         self.hm_alpha = float(hm_cfg["temporal_alpha"])
+        self.max_range_mm = 6000.0
+        self.azimuth_half_deg = 60.0
 
         self.x_grid = np.arange(self.hm_x_min, self.hm_x_max + self.hm_cell, self.hm_cell)
         self.y_grid = np.arange(self.hm_y_min, self.hm_y_max + self.hm_cell, self.hm_cell)
         self.mesh_x, self.mesh_y = np.meshgrid(self.x_grid, self.y_grid)
         self.prev_heatmap = np.zeros_like(self.mesh_x, dtype=float)
+        self.visibility_mask = self._build_visibility_mask()
 
         self.tracks: list[TrackState] = []
         self.next_track_id = 1
@@ -254,5 +257,35 @@ class FusionEngine:
                 hm += t.confidence * np.exp(-(dx * dx + dy * dy) / denom)
 
         hm = self.hm_alpha * hm + (1.0 - self.hm_alpha) * self.prev_heatmap
+        hm[~self.visibility_mask] = 0.0
         self.prev_heatmap = hm
-        return hm
+        out = hm.copy()
+        out[~self.visibility_mask] = np.nan
+        return out
+
+    def _build_visibility_mask(self) -> np.ndarray:
+        mask = np.zeros_like(self.mesh_x, dtype=bool)
+        sensors = self.config.geometry.get("sensors", [])
+        fov_rad = math.radians(self.azimuth_half_deg)
+        range_sq = self.max_range_mm * self.max_range_mm
+
+        for sensor in sensors:
+            if not bool(sensor.get("enabled", True)):
+                continue
+            sx = float(sensor.get("x_offset_mm", 0.0))
+            sy = float(sensor.get("y_offset_mm", 0.0))
+            yaw = math.radians(float(sensor.get("yaw_deg", 0.0)))
+            c = math.cos(yaw)
+            s = math.sin(yaw)
+
+            dx = self.mesh_x - sx
+            dy = self.mesh_y - sy
+            local_x = c * dx + s * dy
+            local_y = -s * dx + c * dy
+
+            in_front = local_y >= 0.0
+            in_range = (local_x * local_x + local_y * local_y) <= range_sq
+            in_fov = np.abs(np.arctan2(local_x, np.maximum(local_y, 1e-6))) <= fov_rad
+            mask |= in_front & in_range & in_fov
+
+        return mask

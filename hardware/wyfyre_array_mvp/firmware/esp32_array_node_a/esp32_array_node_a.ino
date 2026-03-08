@@ -1,11 +1,16 @@
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 
 static const char* NODE_ID = "A";
 static const uint32_t SERIAL_BAUD = 115200;
 static const uint32_t RADAR_BAUD = 256000;
 
 static const uint8_t PEER_B_MAC[6] = {0xE4, 0x65, 0xB8, 0x4A, 0x19, 0x7C};
+static const uint8_t ESPNOW_CHANNEL = 1;
+static const uint16_t ESPNOW_MAGIC = 0x5759;
+static const uint8_t ESPNOW_VERSION = 1;
+static const uint32_t REMOTE_STALE_MS = 1500;
 
 static const uint16_t REPORT_FRAME_SIZE = 30;
 static const uint8_t REPORT_HEADER[4] = {0xAA, 0xFF, 0x03, 0x00};
@@ -42,6 +47,12 @@ struct SensorState {
   Detection targets[3];
 };
 
+struct __attribute__((packed)) EspNowHeader {
+  uint16_t magic;
+  uint8_t version;
+  uint8_t packet_type;
+};
+
 struct __attribute__((packed)) EspNowDetection {
   uint8_t sensor_global_index;
   uint8_t target_id;
@@ -53,15 +64,24 @@ struct __attribute__((packed)) EspNowDetection {
 };
 
 struct __attribute__((packed)) EspNowTelemetry {
+  uint16_t magic;
+  uint8_t version;
   uint8_t packet_type;
   uint8_t mode;
+  uint8_t reserved;
   uint32_t timestamp_ms;
   uint32_t seq;
+  uint32_t tx_ok;
+  uint32_t tx_fail;
+  uint8_t sensor_frame_mask;
+  uint8_t sensor_active_mask;
   uint8_t count;
   EspNowDetection detections[9];
 };
 
 struct __attribute__((packed)) EspNowCommand {
+  uint16_t magic;
+  uint8_t version;
   uint8_t packet_type;
   uint8_t command;
   uint8_t value;
@@ -73,19 +93,34 @@ HardwareSerial sensorUart2(2);
 HardwareSerial* SENSOR_UARTS[2] = {&sensorUart2, &sensorUart1};
 static const char* SENSOR_IDS[2] = {"S0", "S1"};
 static const uint8_t SENSOR_GLOBAL_INDEX[2] = {0, 1};
-static const int RX_PINS[2] = {18, 16};
-static const int TX_PINS[2] = {19, 17};
+static const int RX_PINS[2] = {16, 26};
+static const int TX_PINS[2] = {17, 25};
 
 SensorState sensorState[2];
 EspNowTelemetry latestRemoteTelemetry;
 bool haveRemoteTelemetry = false;
 uint32_t remoteLastSeenMs = 0;
+uint32_t remoteRxCount = 0;
+uint32_t remoteDropCount = 0;
+uint32_t remoteLastSeq = 0;
+bool remoteSeqInitialized = false;
+uint32_t cmdSendOk = 0;
+uint32_t cmdSendFail = 0;
 TrackMode desiredMode = TRACK_MULTI;
 uint32_t cmdSeq = 1;
 
 int16_t decodeSigned15(uint16_t raw) {
   int16_t mag = raw & 0x7FFF;
   return (raw & 0x8000) ? -mag : mag;
+}
+
+void onEspNowSend(const uint8_t* mac, esp_now_send_status_t status) {
+  (void)mac;
+  if (status == ESP_NOW_SEND_SUCCESS) {
+    cmdSendOk++;
+  } else {
+    cmdSendFail++;
+  }
 }
 
 void sendCommandToSensor(HardwareSerial& uart, uint8_t cmdLo, uint8_t cmdHi) {
@@ -122,7 +157,9 @@ void applyLocalMode(TrackMode mode) {
 }
 
 void sendModeToPeerB(TrackMode mode) {
-  EspNowCommand cmd;
+  EspNowCommand cmd = {};
+  cmd.magic = ESPNOW_MAGIC;
+  cmd.version = ESPNOW_VERSION;
   cmd.packet_type = PKT_COMMAND;
   cmd.command = CMD_SET_MODE;
   cmd.value = (mode == TRACK_SINGLE) ? 1 : 2;
@@ -143,18 +180,10 @@ bool parseOneReportFrame(SensorState& state, HardwareSerial& uart) {
     }
     state.frame[state.fill++] = b;
 
-    if (state.fill == 1 && state.frame[0] != REPORT_HEADER[0]) {
-      state.fill = 0;
-    }
-    if (state.fill == 2 && state.frame[1] != REPORT_HEADER[1]) {
-      state.fill = 0;
-    }
-    if (state.fill == 3 && state.frame[2] != REPORT_HEADER[2]) {
-      state.fill = 0;
-    }
-    if (state.fill == 4 && state.frame[3] != REPORT_HEADER[3]) {
-      state.fill = 0;
-    }
+    if (state.fill == 1 && state.frame[0] != REPORT_HEADER[0]) state.fill = 0;
+    if (state.fill == 2 && state.frame[1] != REPORT_HEADER[1]) state.fill = 0;
+    if (state.fill == 3 && state.frame[2] != REPORT_HEADER[2]) state.fill = 0;
+    if (state.fill == 4 && state.frame[3] != REPORT_HEADER[3]) state.fill = 0;
 
     if (state.fill == REPORT_FRAME_SIZE) {
       if (state.frame[28] == REPORT_TAIL[0] && state.frame[29] == REPORT_TAIL[1]) {
@@ -182,84 +211,153 @@ bool parseOneReportFrame(SensorState& state, HardwareSerial& uart) {
 
 void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
   (void)mac;
-  if (len <= 0 || data == nullptr) {
+  if (len < static_cast<int>(sizeof(EspNowHeader)) || data == nullptr) {
     return;
   }
-  if (data[0] == PKT_TELEMETRY && len == static_cast<int>(sizeof(EspNowTelemetry))) {
-    memcpy(&latestRemoteTelemetry, data, sizeof(EspNowTelemetry));
+
+  EspNowHeader hdr;
+  memcpy(&hdr, data, sizeof(hdr));
+  if (hdr.magic != ESPNOW_MAGIC || hdr.version != ESPNOW_VERSION) {
+    return;
+  }
+
+  if (hdr.packet_type == PKT_TELEMETRY && len == static_cast<int>(sizeof(EspNowTelemetry))) {
+    EspNowTelemetry pkt;
+    memcpy(&pkt, data, sizeof(pkt));
+    if (remoteSeqInitialized && pkt.seq != (remoteLastSeq + 1)) {
+      remoteDropCount++;
+    }
+    remoteSeqInitialized = true;
+    remoteLastSeq = pkt.seq;
+    latestRemoteTelemetry = pkt;
     haveRemoteTelemetry = true;
     remoteLastSeenMs = millis();
+    remoteRxCount++;
   }
+}
+
+void appendDetectionJson(
+    String& payload,
+    bool& first,
+    const char* sensorId,
+    uint8_t sensorIndex,
+    uint8_t targetId,
+    int16_t x,
+    int16_t y,
+    int16_t speed,
+    uint16_t dist,
+    bool active) {
+  if (!first) {
+    payload += ",";
+  }
+  first = false;
+  payload += "{\"sensor_id\":\"";
+  payload += sensorId;
+  payload += "\",\"sensor_index\":";
+  payload += String(sensorIndex);
+  payload += ",\"target_id\":";
+  payload += String(targetId);
+  payload += ",\"x_mm\":";
+  payload += String(x);
+  payload += ",\"y_mm\":";
+  payload += String(y);
+  payload += ",\"speed_cms\":";
+  payload += String(speed);
+  payload += ",\"distance_resolution_mm\":";
+  payload += String(dist);
+  payload += ",\"active\":";
+  payload += active ? "true" : "false";
+  payload += "}";
 }
 
 void emitCombinedJson() {
   String payload;
-  payload.reserve(2600);
+  payload.reserve(3600);
+  uint32_t now = millis();
+  bool remoteFresh = haveRemoteTelemetry && ((now - remoteLastSeenMs) <= REMOTE_STALE_MS);
+  uint8_t localFrameMask = 0;
+  uint8_t localActiveMask = 0;
+
+  for (uint8_t s = 0; s < 2; ++s) {
+    if (sensorState[s].have_last) {
+      localFrameMask |= static_cast<uint8_t>(1U << s);
+    }
+    for (uint8_t t = 0; t < 3; ++t) {
+      if (sensorState[s].targets[t].active) {
+        localActiveMask |= static_cast<uint8_t>(1U << s);
+        break;
+      }
+    }
+  }
+
   payload += "{\"msg\":\"detections\",\"node_id\":\"";
   payload += NODE_ID;
   payload += "\",\"timestamp_ms\":";
-  payload += String(millis());
+  payload += String(now);
   payload += ",\"mode\":";
   payload += (desiredMode == TRACK_SINGLE) ? "\"single\"" : "\"multi\"";
   payload += ",\"remote_link_ms\":";
-  payload += String(haveRemoteTelemetry ? (millis() - remoteLastSeenMs) : 999999);
+  payload += String(haveRemoteTelemetry ? (now - remoteLastSeenMs) : 999999);
+  payload += ",\"remote_seq\":";
+  payload += String(remoteLastSeq);
+  payload += ",\"remote_rx_count\":";
+  payload += String(remoteRxCount);
+  payload += ",\"remote_drop_count\":";
+  payload += String(remoteDropCount);
+  payload += ",\"remote_tx_ok\":";
+  payload += String(latestRemoteTelemetry.tx_ok);
+  payload += ",\"remote_tx_fail\":";
+  payload += String(latestRemoteTelemetry.tx_fail);
+  payload += ",\"remote_sensor_frame_mask\":";
+  payload += String(latestRemoteTelemetry.sensor_frame_mask);
+  payload += ",\"remote_sensor_active_mask\":";
+  payload += String(latestRemoteTelemetry.sensor_active_mask);
+  payload += ",\"cmd_send_ok\":";
+  payload += String(cmdSendOk);
+  payload += ",\"cmd_send_fail\":";
+  payload += String(cmdSendFail);
+  payload += ",\"local_sensor_frame_mask\":";
+  payload += String(localFrameMask);
+  payload += ",\"local_sensor_active_mask\":";
+  payload += String(localActiveMask);
   payload += ",\"detections\":[";
 
   bool first = true;
   for (uint8_t s = 0; s < 2; ++s) {
     if (!sensorState[s].have_last) {
+      for (uint8_t t = 0; t < 3; ++t) {
+        appendDetectionJson(payload, first, SENSOR_IDS[s], SENSOR_GLOBAL_INDEX[s], t, 0, 0, 0, 0, false);
+      }
       continue;
     }
+
     for (uint8_t t = 0; t < 3; ++t) {
       const Detection& d = sensorState[s].targets[t];
-      if (!first) {
-        payload += ",";
-      }
-      first = false;
-      payload += "{\"sensor_id\":\"";
-      payload += SENSOR_IDS[s];
-      payload += "\",\"sensor_index\":";
-      payload += String(SENSOR_GLOBAL_INDEX[s]);
-      payload += ",\"target_id\":";
-      payload += String(t);
-      payload += ",\"x_mm\":";
-      payload += String(d.x_mm);
-      payload += ",\"y_mm\":";
-      payload += String(d.y_mm);
-      payload += ",\"speed_cms\":";
-      payload += String(d.speed_cms);
-      payload += ",\"distance_resolution_mm\":";
-      payload += String(d.dist_res_mm);
-      payload += ",\"active\":";
-      payload += d.active ? "true" : "false";
-      payload += "}";
+      appendDetectionJson(payload, first, SENSOR_IDS[s], SENSOR_GLOBAL_INDEX[s], t, d.x_mm, d.y_mm, d.speed_cms, d.dist_res_mm, d.active);
     }
   }
 
-  if (haveRemoteTelemetry && (millis() - remoteLastSeenMs) < 1500) {
+  bool remoteSeen[3][3] = {{false, false, false}, {false, false, false}, {false, false, false}};
+  if (remoteFresh) {
     for (uint8_t i = 0; i < latestRemoteTelemetry.count && i < 9; ++i) {
       const EspNowDetection& d = latestRemoteTelemetry.detections[i];
-      if (!first) {
-        payload += ",";
+      if (d.sensor_global_index < 2 || d.sensor_global_index > 4 || d.target_id > 2) {
+        continue;
       }
-      first = false;
-      payload += "{\"sensor_id\":\"S";
-      payload += String(d.sensor_global_index);
-      payload += "\",\"sensor_index\":";
-      payload += String(d.sensor_global_index);
-      payload += ",\"target_id\":";
-      payload += String(d.target_id);
-      payload += ",\"x_mm\":";
-      payload += String(d.x_mm);
-      payload += ",\"y_mm\":";
-      payload += String(d.y_mm);
-      payload += ",\"speed_cms\":";
-      payload += String(d.speed_cms);
-      payload += ",\"distance_resolution_mm\":";
-      payload += String(d.distance_resolution_mm);
-      payload += ",\"active\":";
-      payload += d.active ? "true" : "false";
-      payload += "}";
+      uint8_t sensorOffset = d.sensor_global_index - 2;
+      remoteSeen[sensorOffset][d.target_id] = true;
+      String sid = "S" + String(d.sensor_global_index);
+      appendDetectionJson(payload, first, sid.c_str(), d.sensor_global_index, d.target_id, d.x_mm, d.y_mm, d.speed_cms, d.distance_resolution_mm, d.active != 0);
+    }
+  }
+
+  for (uint8_t sensorIdx = 2; sensorIdx <= 4; ++sensorIdx) {
+    for (uint8_t targetId = 0; targetId < 3; ++targetId) {
+      bool seen = remoteFresh && remoteSeen[sensorIdx - 2][targetId];
+      if (!seen) {
+        String sid = "S" + String(sensorIdx);
+        appendDetectionJson(payload, first, sid.c_str(), sensorIdx, targetId, 0, 0, 0, 0, false);
+      }
     }
   }
 
@@ -335,14 +433,20 @@ void pollSerialCommands() {
 bool setupEspNow() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous(false);
+
   if (esp_now_init() != ESP_OK) {
     return false;
   }
+
   esp_now_register_recv_cb(onEspNowRecv);
+  esp_now_register_send_cb(onEspNowSend);
 
   esp_now_peer_info_t peerInfo = {};
   memcpy(peerInfo.peer_addr, PEER_B_MAC, 6);
-  peerInfo.channel = 0;
+  peerInfo.channel = ESPNOW_CHANNEL;
   peerInfo.encrypt = false;
   if (esp_now_add_peer(&peerInfo) != ESP_OK) {
     return false;
@@ -359,7 +463,7 @@ void setup() {
   delay(300);
   applyLocalMode(TRACK_MULTI);
   sendModeToPeerB(TRACK_MULTI);
-  Serial.printf("{\"msg\":\"identity\",\"node_id\":\"%s\",\"mac\":\"%s\"}\n", NODE_ID, WiFi.macAddress().c_str());
+  Serial.printf("{\"msg\":\"identity\",\"node_id\":\"%s\",\"mac\":\"%s\",\"espnow_channel\":%u}\n", NODE_ID, WiFi.macAddress().c_str(), ESPNOW_CHANNEL);
   emitStatus("boot", espOk ? "espnow_ok" : "espnow_fail");
 }
 
