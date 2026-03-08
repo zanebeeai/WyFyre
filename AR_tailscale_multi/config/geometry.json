@@ -1,0 +1,56 @@
+{
+  "bar_name": "wyfyre_horizontal_5",
+  "units": "mm",
+  "default_spacing_mm": 120,
+  "radar": {
+    "max_range_mm": 6000,
+    "azimuth_half_deg": 60
+  },
+  "sensors": [
+    {
+      "sensor_id": "S0",
+      "enabled": true,
+      "x_offset_mm": -240,
+      "y_offset_mm": 0,
+      "yaw_deg": 0,
+      "weight": 1.0,
+      "node_id": "A"
+    },
+    {
+      "sensor_id": "S1",
+      "enabled": true,
+      "x_offset_mm": -120,
+      "y_offset_mm": 0,
+      "yaw_deg": 0,
+      "weight": 1.0,
+      "node_id": "A"
+    },
+    {
+      "sensor_id": "S2",
+      "enabled": true,
+      "x_offset_mm": 0,
+      "y_offset_mm": 0,
+      "yaw_deg": 0,
+      "weight": 1.1,
+      "node_id": "B"
+    },
+    {
+      "sensor_id": "S3",
+      "enabled": true,
+      "x_offset_mm": 120,
+      "y_offset_mm": 0,
+      "yaw_deg": 0,
+      "weight": 1.0,
+      "node_id": "B"
+    },
+    {
+      "sensor_id": "S4",
+      "enabled": true,
+      "x_offset_mm": 240,
+      "y_offset_mm": 0,
+      "yaw_deg": 0,
+      "weight": 1.0,
+      "node_id": "B"
+    }
+  ]
+}

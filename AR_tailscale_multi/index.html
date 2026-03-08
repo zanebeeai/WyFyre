@@ -1,0 +1,606 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WyFyre AR Tailscale Multi</title>
+  <style>
+    :root {
+      --hud-bg: rgba(6, 15, 26, 0.78);
+      --hud-border: rgba(137, 197, 255, 0.5);
+      --hud-text: #c9e7ff;
+      --warn: #ffbf73;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+    body {
+      background: radial-gradient(circle at 50% -20%, #11335c 0%, #060e1b 52%, #03070f 100%);
+      color: var(--hud-text);
+      font-family: "JetBrains Mono", "Consolas", monospace;
+    }
+    canvas#scene { width: 100vw; height: 100vh; display: block; }
+
+    .panel {
+      position: fixed;
+      border-radius: 10px;
+      border: 1px solid var(--hud-border);
+      background: var(--hud-bg);
+      backdrop-filter: blur(5px);
+      pointer-events: none;
+    }
+    #hud {
+      left: 16px;
+      top: 16px;
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.45;
+      max-width: 360px;
+    }
+    #radar {
+      top: 16px;
+      right: 16px;
+      width: min(36vw, 310px);
+      aspect-ratio: 1;
+      overflow: hidden;
+    }
+    #radar canvas { width: 100%; height: 100%; display: block; }
+    #radarTitle {
+      position: absolute;
+      left: 10px;
+      top: 8px;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      color: #d5edff;
+      text-transform: uppercase;
+      text-shadow: 0 0 10px rgba(83, 182, 255, 0.4);
+      pointer-events: none;
+    }
+
+    #actions {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    button {
+      border: 1px solid rgba(120, 201, 255, 0.45);
+      background: rgba(12, 32, 54, 0.82);
+      color: #d4ecff;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font: 600 13px "JetBrains Mono", "Consolas", monospace;
+      cursor: pointer;
+      transition: transform 120ms ease, background 120ms ease;
+      pointer-events: auto;
+    }
+    button:hover { transform: translateY(-1px); background: rgba(18, 45, 73, 0.9); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    @media (max-width: 720px) {
+      #hud { font-size: 11px; max-width: 280px; }
+      #actions { width: calc(100vw - 24px); }
+      button { padding: 9px 12px; font-size: 12px; }
+    }
+  </style>
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <div id="hud" class="panel">
+    <div><strong>WyFyre AR Multi (Tailscale)</strong></div>
+    <div id="status">Status: connecting...</div>
+    <div id="role">Role: -</div>
+    <div id="transport">Transport: -</div>
+    <div id="targets">Fused Targets: 0</div>
+    <div id="rejects">Near rejects: 0</div>
+    <div id="nodes">Nodes: -</div>
+    <div id="masterInfo">Master: -</div>
+    <div id="calib" style="color: var(--warn)">Calibration: fixed offset mode</div>
+  </div>
+
+  <div id="radar" class="panel">
+    <div id="radarTitle">Confidence Radar</div>
+    <canvas id="radarCanvas" width="310" height="310"></canvas>
+  </div>
+
+  <div id="actions">
+    <button id="masterBtn">Join as Master</button>
+    <button id="slaveBtn">Join as Slave</button>
+    <button id="xrBtn">Enter XR</button>
+  </div>
+
+  <script>
+    const WS_PROTO = location.protocol === "https:" ? "wss" : "ws";
+    const WS_URL = `${WS_PROTO}://${location.host}/ws`;
+    const MAX_RENDERED_TARGETS = 8;
+    const SENSOR_HEIGHT_OFFSET_M = -0.15;
+    const LERP = 0.15;
+    const INITIAL_RELATIVE_OFFSET = {
+      position: { x: 2.0, y: 0.0, z: 0.0 },
+      rotation: 0,
+    };
+
+    const roleParam = (new URLSearchParams(location.search)).get("role");
+    let desiredRole = (roleParam === "master" || roleParam === "slave") ? roleParam : "slave";
+    let assignedRole = "slave";
+
+    const sceneCanvas = document.getElementById("scene");
+    const engine = new BABYLON.Engine(sceneCanvas, true);
+    const scene = new BABYLON.Scene(engine);
+    scene.clearColor = new BABYLON.Color4(0.01, 0.03, 0.06, 1.0);
+
+    const camera = new BABYLON.UniversalCamera("cam", new BABYLON.Vector3(0, 1.6, -0.8), scene);
+    camera.setTarget(new BABYLON.Vector3(0, 1.6, 2));
+    camera.attachControl(sceneCanvas, true);
+
+    const light = new BABYLON.HemisphericLight("h", new BABYLON.Vector3(0, 1, 0), scene);
+    light.intensity = 0.65;
+
+    const ground = BABYLON.MeshBuilder.CreateGround("g", { width: 12, height: 12, subdivisions: 10 }, scene);
+    const gm = new BABYLON.StandardMaterial("gm", scene);
+    gm.wireframe = true;
+    gm.alpha = 0.15;
+    gm.emissiveColor = new BABYLON.Color3(0.25, 0.8, 1.0);
+    ground.material = gm;
+    const glow = new BABYLON.GlowLayer("gl", scene);
+    glow.intensity = 1.25;
+
+    const targetSlots = [];
+    const slotByTrackId = new Map();
+    const latestTargetPoints = [];
+    const latestRejectedPoints = [];
+    let latestHeatmap = null;
+    let latestExtent = null;
+    let radarConfig = { maxRangeMm: 6000, azimuthHalfDeg: 60, minValidRangeMm: 450 };
+
+    let ws = null;
+    let masterPose = null;
+
+    function makeTargetSlot(i) {
+      const root = new BABYLON.TransformNode(`target_${i}`, scene);
+      const ping = BABYLON.MeshBuilder.CreateTorus(`ping_${i}`, { diameter: 0.32, thickness: 0.02, tessellation: 42 }, scene);
+      ping.parent = root;
+      ping.rotation.x = Math.PI * 0.5;
+      ping.position.y = SENSOR_HEIGHT_OFFSET_M;
+      const pingMat = new BABYLON.StandardMaterial(`pm_${i}`, scene);
+      pingMat.emissiveColor = new BABYLON.Color3(0.2, 0.95, 1.0);
+      ping.material = pingMat;
+
+      const core = BABYLON.MeshBuilder.CreateSphere(`core_${i}`, { diameter: 0.08, segments: 10 }, scene);
+      core.parent = root;
+      core.position.y = SENSOR_HEIGHT_OFFSET_M;
+      const coreMat = new BABYLON.StandardMaterial(`cm_${i}`, scene);
+      coreMat.emissiveColor = new BABYLON.Color3(0.92, 0.99, 1.0);
+      core.material = coreMat;
+
+      const beam = BABYLON.MeshBuilder.CreateCylinder(`beam_${i}`, { height: 0.7, diameter: 0.03, tessellation: 12 }, scene);
+      beam.parent = root;
+      beam.position.y = SENSOR_HEIGHT_OFFSET_M + 0.35;
+      const beamMat = new BABYLON.StandardMaterial(`bm_${i}`, scene);
+      beamMat.emissiveColor = new BABYLON.Color3(0.1, 0.6, 1.0);
+      beam.material = beamMat;
+
+      root.setEnabled(false);
+      return { root, ping, pingMat, beamMat, trackId: null, pulse: 1, confidence: 0, lastSeenMs: 0, targetPos: new BABYLON.Vector3() };
+    }
+    for (let i = 0; i < MAX_RENDERED_TARGETS; i += 1) targetSlots.push(makeTargetSlot(i));
+
+    function getPoseSourceCamera() {
+      return scene.activeCamera || camera;
+    }
+
+    function getYawRadians(cam) {
+      if (cam && cam.absoluteRotation) return cam.absoluteRotation.toEulerAngles().y;
+      if (cam && cam.rotation) return cam.rotation.y;
+      return 0;
+    }
+
+    function getCurrentPose() {
+      const cam = getPoseSourceCamera();
+      let rot = { x: 0, y: 0, z: 0 };
+      if (cam && cam.rotation) {
+        rot = { x: cam.rotation.x, y: cam.rotation.y, z: cam.rotation.z };
+      } else if (cam && cam.absoluteRotation) {
+        const e = cam.absoluteRotation.toEulerAngles();
+        rot = { x: e.x, y: e.y, z: e.z };
+      }
+      return {
+        position: { x: cam.globalPosition.x, y: cam.globalPosition.y, z: cam.globalPosition.z },
+        rotation: rot,
+      };
+    }
+
+    function sensorPointToWorld(xMm, yMm) {
+      const pose = getCurrentPose();
+      const local = new BABYLON.Vector3(xMm / 1000, SENSOR_HEIGHT_OFFSET_M, yMm / 1000);
+      const rot = BABYLON.Quaternion.FromEulerAngles(pose.rotation.x, pose.rotation.y, pose.rotation.z);
+      const worldOffset = local.applyRotationQuaternion(rot);
+      return new BABYLON.Vector3(pose.position.x, pose.position.y, pose.position.z).add(worldOffset);
+    }
+
+    function transformMasterLocalToSlaveLocal(xMm, yMm, masterPoseNow, myPose) {
+      if (!masterPoseNow) {
+        return { x_mm: xMm, y_mm: yMm };
+      }
+
+      const localVec = new BABYLON.Vector3(xMm / 1000, 0, yMm / 1000);
+      const masterRot = BABYLON.Quaternion.FromEulerAngles(
+        masterPoseNow.rotation?.x || 0,
+        masterPoseNow.rotation?.y || 0,
+        masterPoseNow.rotation?.z || 0,
+      );
+      const worldVec = localVec.applyRotationQuaternion(masterRot);
+
+      const globalPos = new BABYLON.Vector3(
+        worldVec.x + masterPoseNow.position.x + INITIAL_RELATIVE_OFFSET.position.x,
+        worldVec.y + masterPoseNow.position.y + INITIAL_RELATIVE_OFFSET.position.y,
+        worldVec.z + masterPoseNow.position.z + INITIAL_RELATIVE_OFFSET.position.z,
+      );
+
+      const receiverPos = new BABYLON.Vector3(myPose.position.x, myPose.position.y, myPose.position.z);
+      const relativePos = globalPos.subtract(receiverPos);
+      const receiverRot = BABYLON.Quaternion.FromEulerAngles(
+        myPose.rotation?.x || 0,
+        myPose.rotation?.y || 0,
+        myPose.rotation?.z || 0,
+      );
+      const receiverRotInv = BABYLON.Quaternion.Inverse(receiverRot);
+      const localToReceiver = relativePos.applyRotationQuaternion(receiverRotInv);
+      return { x_mm: localToReceiver.x * 1000, y_mm: localToReceiver.z * 1000 };
+    }
+
+    function releaseStaleSlots(nowMs) {
+      for (const slot of targetSlots) {
+        if (slot.trackId !== null && (nowMs - slot.lastSeenMs) > 550) {
+          slotByTrackId.delete(slot.trackId);
+          slot.trackId = null;
+          slot.root.setEnabled(false);
+        }
+      }
+    }
+    function getFreeSlot() {
+      for (const slot of targetSlots) if (slot.trackId === null) return slot;
+      return null;
+    }
+
+    function updateTargets(frame) {
+      const nowMs = Date.now();
+      const targets = frame.fused_targets || [];
+      latestTargetPoints.length = 0;
+      latestRejectedPoints.length = 0;
+
+      const myPose = getCurrentPose();
+
+      for (const t of targets.slice(0, MAX_RENDERED_TARGETS)) {
+        let slot = slotByTrackId.get(t.track_id);
+        if (!slot) {
+          slot = getFreeSlot();
+          if (!slot) continue;
+          slot.trackId = t.track_id;
+          slotByTrackId.set(t.track_id, slot);
+          slot.pulse = 0;
+          slot.root.setEnabled(true);
+        }
+
+        let local = { x_mm: t.x_mm, y_mm: t.y_mm };
+        if (assignedRole === "slave") {
+          local = transformMasterLocalToSlaveLocal(t.x_mm, t.y_mm, masterPose, myPose);
+        }
+        slot.confidence = Math.max(0, Math.min(1, t.confidence || 0));
+        slot.targetPos.copyFrom(sensorPointToWorld(local.x_mm, local.y_mm));
+        slot.lastSeenMs = nowMs;
+        latestTargetPoints.push({ x_mm: local.x_mm, y_mm: local.y_mm, confidence: slot.confidence });
+      }
+
+      for (const d of (frame.rejected_near || [])) {
+        let local = { x_mm: d.x_mm, y_mm: d.y_mm };
+        if (assignedRole === "slave") {
+          local = transformMasterLocalToSlaveLocal(d.x_mm, d.y_mm, masterPose, myPose);
+        }
+        latestRejectedPoints.push(local);
+      }
+
+      releaseStaleSlots(nowMs);
+      document.getElementById("targets").textContent = `Fused Targets: ${targets.length}`;
+      document.getElementById("rejects").textContent = `Near rejects: ${latestRejectedPoints.length}`;
+    }
+
+    function updateHud(frame) {
+      const nodeSummary = (frame.status?.nodes || []).map((n) => n.online ? `${n.node_id}:on(${n.age_ms}ms)` : `${n.node_id}:off`).join(" | ");
+      document.getElementById("transport").textContent = `Transport: ${frame.receiver_mode}`;
+      document.getElementById("nodes").textContent = `Nodes: ${nodeSummary || "-"}`;
+      const masterText = frame.master?.present ? `${frame.master.client_id || "?"}` : "none";
+      document.getElementById("masterInfo").textContent = `Master: ${masterText}`;
+      document.getElementById("role").textContent = `Role: ${assignedRole.toUpperCase()} (desired: ${desiredRole.toUpperCase()})`;
+    }
+
+    function decodeHeatmapBlob(blobB64) {
+      const binary = atob(blobB64);
+      const out = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
+      return out;
+    }
+
+    function updateHeatmap(frame) {
+      if (frame.radar) {
+        radarConfig.maxRangeMm = frame.radar.max_range_mm || radarConfig.maxRangeMm;
+        radarConfig.azimuthHalfDeg = frame.radar.azimuth_half_deg || radarConfig.azimuthHalfDeg;
+        radarConfig.minValidRangeMm = frame.radar.min_valid_range_mm || radarConfig.minValidRangeMm;
+      }
+      if (!frame.heatmap || !frame.heatmap.u8_b64) return;
+      latestHeatmap = { width: frame.heatmap.width, height: frame.heatmap.height, data: decodeHeatmapBlob(frame.heatmap.u8_b64) };
+      latestExtent = frame.heatmap.extent;
+    }
+
+    const radarCanvas = document.getElementById("radarCanvas");
+    const radarCtx = radarCanvas.getContext("2d");
+
+    function radarToCanvas(xMm, yMm) {
+      const w = radarCanvas.width;
+      const h = radarCanvas.height;
+      const cx = w * 0.5;
+      const cy = h * 0.86;
+      const maxR = h * 0.73;
+      const angle = Math.atan2(xMm, Math.max(1, yMm));
+      const distNorm = Math.min(1, Math.sqrt((xMm * xMm + yMm * yMm)) / radarConfig.maxRangeMm);
+      const r = distNorm * maxR;
+      return { x: cx + Math.sin(angle) * r, y: cy - Math.cos(angle) * r };
+    }
+
+    function radarAngles() {
+      const half = (radarConfig.azimuthHalfDeg * Math.PI) / 180;
+      return { start: (-Math.PI * 0.5) - half, end: (-Math.PI * 0.5) + half };
+    }
+
+    function pointInRadarFov(xMm, yMm) {
+      const angleDeg = Math.abs(Math.atan2(xMm, Math.max(1, yMm)) * (180 / Math.PI));
+      const rangeMm = Math.sqrt((xMm * xMm) + (yMm * yMm));
+      return angleDeg <= radarConfig.azimuthHalfDeg && rangeMm <= radarConfig.maxRangeMm;
+    }
+
+    function infernoColor(v255) {
+      const t = Math.max(0, Math.min(1, v255 / 255));
+      const stops = [[0.00,[0,0,4]],[0.18,[31,12,72]],[0.36,[85,15,109]],[0.54,[136,34,106]],[0.72,[186,54,85]],[0.86,[227,89,51]],[0.94,[249,140,10]],[1.00,[252,255,164]]];
+      for (let i = 1; i < stops.length; i += 1) {
+        const [t1, c1] = stops[i];
+        const [t0, c0] = stops[i - 1];
+        if (t <= t1) {
+          const k = (t - t0) / Math.max(1e-6, (t1 - t0));
+          return { r: Math.round(c0[0] + (c1[0] - c0[0]) * k), g: Math.round(c0[1] + (c1[1] - c0[1]) * k), b: Math.round(c0[2] + (c1[2] - c0[2]) * k) };
+        }
+      }
+      return { r: 252, g: 255, b: 164 };
+    }
+
+    function drawRadarBase() {
+      const w = radarCanvas.width;
+      const h = radarCanvas.height;
+      const cx = w * 0.5;
+      const cy = h * 0.86;
+      const maxR = h * 0.73;
+      const ang = radarAngles();
+
+      radarCtx.clearRect(0, 0, w, h);
+      radarCtx.fillStyle = "rgba(3,12,23,0.92)";
+      radarCtx.fillRect(0, 0, w, h);
+
+      radarCtx.beginPath();
+      radarCtx.moveTo(cx, cy);
+      radarCtx.arc(cx, cy, maxR, ang.start, ang.end);
+      radarCtx.closePath();
+      radarCtx.fillStyle = "rgba(46,56,82,0.18)";
+      radarCtx.fill();
+
+      radarCtx.strokeStyle = "rgba(102,189,255,0.5)";
+      radarCtx.lineWidth = 1;
+      for (let i = 1; i <= 6; i += 1) {
+        const r = (maxR * i) / 6;
+        radarCtx.beginPath();
+        radarCtx.arc(cx, cy, r, ang.start, ang.end);
+        radarCtx.stroke();
+        const meters = Math.round((radarConfig.maxRangeMm * i) / 6 / 100) / 10;
+        radarCtx.fillStyle = "rgba(190, 210, 230, 0.65)";
+        radarCtx.font = "10px JetBrains Mono, Consolas, monospace";
+        radarCtx.fillText(`${meters}m`, cx + 6, cy - r - 3);
+      }
+
+      const spread = radarConfig.azimuthHalfDeg;
+      [(-spread), (-spread / 2), 0, (spread / 2), spread].forEach((deg) => {
+        const rad = (deg * Math.PI) / 180;
+        const x = cx + Math.sin(rad) * maxR;
+        const y = cy - Math.cos(rad) * maxR;
+        radarCtx.beginPath();
+        radarCtx.moveTo(cx, cy);
+        radarCtx.lineTo(x, y);
+        radarCtx.stroke();
+        radarCtx.fillStyle = "rgba(190, 210, 230, 0.7)";
+        radarCtx.font = "10px JetBrains Mono, Consolas, monospace";
+        radarCtx.fillText(`${deg.toFixed(0)}deg`, x * 0.92 + cx * 0.08 - 14, y * 0.92 + cy * 0.08 - 2);
+      });
+
+      const cutoffR = Math.min(maxR, (radarConfig.minValidRangeMm / Math.max(1, radarConfig.maxRangeMm)) * maxR);
+      radarCtx.beginPath();
+      radarCtx.setLineDash([5, 4]);
+      radarCtx.arc(cx, cy, cutoffR, ang.start, ang.end);
+      radarCtx.strokeStyle = "rgba(168, 168, 168, 0.9)";
+      radarCtx.lineWidth = 1.4;
+      radarCtx.stroke();
+      radarCtx.setLineDash([]);
+      radarCtx.fillStyle = "rgba(186, 186, 186, 0.95)";
+      radarCtx.font = "11px JetBrains Mono, Consolas, monospace";
+      radarCtx.fillText(`cutoff ${Math.round(radarConfig.minValidRangeMm)}mm`, cx + 10, cy - cutoffR - 8);
+    }
+
+    function drawHeatmapOnRadar() {
+      if (!latestHeatmap || !latestExtent) return;
+      const hm = latestHeatmap;
+      const ex = latestExtent;
+      for (let row = 0; row < hm.height; row += 1) {
+        for (let col = 0; col < hm.width; col += 1) {
+          const i = row * hm.width + col;
+          const v = hm.data[i];
+          if (v < 8) continue;
+          const xMm = ex.x_min_mm + (col / (hm.width - 1)) * (ex.x_max_mm - ex.x_min_mm);
+          const yMm = ex.y_min_mm + (row / (hm.height - 1)) * (ex.y_max_mm - ex.y_min_mm);
+          if (!pointInRadarFov(xMm, yMm)) continue;
+          const p = radarToCanvas(xMm, yMm);
+          const c = infernoColor(v);
+          const alpha = Math.min(0.88, (v / 255) * 0.92);
+          radarCtx.fillStyle = `rgba(${c.r}, ${c.g}, ${c.b}, ${alpha})`;
+          radarCtx.fillRect(p.x - 2.0, p.y - 2.0, 4.0, 4.0);
+        }
+      }
+    }
+
+    function drawTargetsOnRadar() {
+      for (const t of latestTargetPoints) {
+        const p = radarToCanvas(t.x_mm, t.y_mm);
+        radarCtx.beginPath();
+        radarCtx.fillStyle = `rgba(126, 232, 255, ${0.5 + 0.5 * t.confidence})`;
+        radarCtx.arc(p.x, p.y, 2 + 4 * t.confidence, 0, Math.PI * 2);
+        radarCtx.fill();
+      }
+      for (const d of latestRejectedPoints) {
+        const p = radarToCanvas(d.x_mm, d.y_mm);
+        radarCtx.beginPath();
+        radarCtx.fillStyle = "rgba(166, 166, 166, 0.9)";
+        radarCtx.arc(p.x, p.y, 2.2, 0, Math.PI * 2);
+        radarCtx.fill();
+      }
+    }
+
+    function renderRadar() {
+      drawRadarBase();
+      drawHeatmapOnRadar();
+      drawTargetsOnRadar();
+    }
+
+    function sendPoseTick() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: "pose", pose: getCurrentPose() }));
+    }
+
+    function setDesiredRole(role) {
+      desiredRole = role;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "register", role: desiredRole }));
+      }
+    }
+
+    function connectWs() {
+      ws = new WebSocket(WS_URL);
+      document.getElementById("status").textContent = "Status: connecting...";
+
+      ws.onopen = () => {
+        document.getElementById("status").textContent = "Status: connected";
+        ws.send(JSON.stringify({ type: "register", role: desiredRole }));
+      };
+
+      ws.onmessage = ({ data }) => {
+        const msg = JSON.parse(data);
+        if (msg.type === "registered") {
+          assignedRole = msg.role_assigned || desiredRole;
+          document.getElementById("calib").textContent = assignedRole === "slave"
+            ? `Calibration: fixed offset (${INITIAL_RELATIVE_OFFSET.position.x.toFixed(1)}m, ${INITIAL_RELATIVE_OFFSET.position.z.toFixed(1)}m)`
+            : "Calibration: master owns board frame";
+          return;
+        }
+        if (msg.type === "role_denied") {
+          assignedRole = msg.role_assigned || "slave";
+          document.getElementById("status").textContent = "Status: master already taken, joined as slave";
+          document.getElementById("calib").textContent =
+            `Calibration: fixed offset (${INITIAL_RELATIVE_OFFSET.position.x.toFixed(1)}m, ${INITIAL_RELATIVE_OFFSET.position.z.toFixed(1)}m)`;
+          return;
+        }
+        if (msg.type !== "fusion_frame") return;
+
+        masterPose = msg.master?.pose || null;
+        updateTargets(msg);
+        updateHeatmap(msg);
+        updateHud(msg);
+      };
+
+      ws.onclose = () => {
+        document.getElementById("status").textContent = "Status: disconnected; retrying...";
+        setTimeout(connectWs, 1500);
+      };
+      ws.onerror = () => {
+        document.getElementById("status").textContent = "Status: socket error";
+      };
+    }
+
+    function animateTargets() {
+      const now = Date.now();
+      for (const slot of targetSlots) {
+        if (slot.trackId === null) continue;
+        BABYLON.Vector3.LerpToRef(slot.root.position, slot.targetPos, LERP, slot.root.position);
+        slot.pulse = Math.min(1, slot.pulse + 0.06);
+        slot.ping.scaling.setAll(1 + slot.pulse * 2.6);
+        slot.pingMat.alpha = 1.0 - slot.pulse * 0.78;
+        slot.beamMat.alpha = 0.18 + slot.confidence * 0.42;
+        slot.root.setEnabled((now - slot.lastSeenMs) <= 600);
+      }
+    }
+
+    async function setupXr() {
+      const xrBtn = document.getElementById("xrBtn");
+      if (!navigator.xr) {
+        xrBtn.textContent = "XR unavailable";
+        xrBtn.disabled = true;
+        return;
+      }
+      let mode = null;
+      if (await navigator.xr.isSessionSupported("immersive-ar")) {
+        mode = "immersive-ar";
+        xrBtn.textContent = "Enter AR";
+      } else if (await navigator.xr.isSessionSupported("immersive-vr")) {
+        mode = "immersive-vr";
+        xrBtn.textContent = "Enter VR";
+      } else {
+        xrBtn.textContent = "XR unsupported";
+        xrBtn.disabled = true;
+        return;
+      }
+
+      xrBtn.onclick = async () => {
+        try {
+          const xr = await scene.createDefaultXRExperienceAsync({
+            uiOptions: { sessionMode: mode },
+            disableDefaultUI: true,
+            disableTeleportation: true,
+            disablePointerSelection: true,
+            disableNearInteraction: true,
+          });
+          await xr.baseExperience.enterXRAsync(mode, "local-floor", xr.renderTarget);
+          if (mode === "immersive-ar") {
+            scene.clearColor = new BABYLON.Color4(0, 0, 0, 0);
+            ground.setEnabled(false);
+          }
+        } catch (err) {
+          xrBtn.textContent = `XR error: ${err.message}`;
+        }
+      };
+    }
+
+    document.getElementById("masterBtn").onclick = () => setDesiredRole("master");
+    document.getElementById("slaveBtn").onclick = () => setDesiredRole("slave");
+
+    connectWs();
+    setupXr();
+    setInterval(sendPoseTick, 100);
+
+    scene.onBeforeRenderObservable.add(() => {
+      animateTargets();
+      renderRadar();
+    });
+
+    engine.runRenderLoop(() => scene.render());
+    window.addEventListener("resize", () => engine.resize());
+  </script>
+</body>
+</html>
