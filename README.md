@@ -31,11 +31,16 @@ wallhacks is a handheld, multi-sensor mmwave system that detects people through 
 
 ### hardware.
 
-- 5x hlk-ld2450 mmwave radar sensors on a horizontal bar.
-- 2x esp32 nodes:
-  - node a: usb host-facing gateway + local sensor ingestion.
-  - node b: remote sensor ingestion + esp-now relay to node a.
-- shared power rail and common ground across radar modules and mcus.
+- **5x hlk-ld2450 mmwave radar sensors on a horizontal bar.**  
+  each ld2450 is a self-contained 24 ghz mmwave fmcw radar module. the chip continuously emits low-power frequency-modulated chirps (linear sweeps of frequency across a small bandwidth). when these chirps reflect off objects in the environment, the returned signal arrives slightly delayed and frequency-shifted. by mixing the received signal with a copy of the transmitted chirp, the radar produces a **beat frequency** whose value encodes the **range** of the reflector. the module internally performs fft processing on these beat signals to estimate distance and angle, while **doppler shifts** caused by moving targets provide velocity estimates. with multiple receive antennas on the board, the chip also performs phase comparison to estimate **azimuth angle**, allowing the module to output 2d target coordinates (x, y) relative to the sensor.
+
+- **2x esp32 nodes:**
+  - **node a:** usb host-facing gateway + local sensor ingestion.
+  - **node b:** remote sensor ingestion + esp-now relay to node a.
+
+- **shared power rail and common ground across radar modules and mcus.**
+
+each radar independently reports detected targets in its own local coordinate frame. because the modules already perform the rf signal processing (chirp generation, mixing, range fft, doppler estimation, and angle-of-arrival calculation) internally, the system only needs to ingest these processed detections rather than raw rf data. the five sensors are spaced across a rigid horizontal bar so their overlapping fields of view create a wider baseline; the host fusion layer then combines their reported detections to improve spatial consistency and tracking robustness compared to a single radar module.
 
 ![final handheld product](./public/finalproduct.jpg)
 
