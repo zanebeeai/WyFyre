@@ -14,6 +14,10 @@ wallhacks is a handheld, multi-sensor mmwave system that detects people through 
 - supports a master/slave multi-headset mode where one headset carries the board and other headsets see aligned target pings relative to the master.
 - filters near-origin interference and exposes rejected points as gray debug dots on the radar.
 
+## inspiration
+
+heavily inspired by Dina Katabi and colleagues' work at CSAIL, notably: [https://rfpose.csail.mit.edu/](https://rfpose.csail.mit.edu/)
+
 ## core capabilities.
 
 ![wallhacks ar view](./public/wallhacks_AR.gif)
