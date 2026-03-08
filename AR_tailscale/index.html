@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WyFyre AR Tailscale</title>
+  <style>
+    :root {
+      --hud-bg: rgba(6, 15, 26, 0.72);
+      --hud-border: rgba(137, 197, 255, 0.45);
+      --hud-text: #c9e7ff;
+      --accent: #58d1ff;
+      --warn: #ffbf73;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+    body {
+      background: radial-gradient(circle at 50% -20%, #11335c 0%, #060e1b 52%, #03070f 100%);
+      color: var(--hud-text);
+      font-family: "JetBrains Mono", "Consolas", monospace;
+    }
+    canvas#scene { width: 100vw; height: 100vh; display: block; }
+
+    #hud {
+      position: fixed;
+      left: 16px;
+      top: 16px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--hud-border);
+      background: var(--hud-bg);
+      backdrop-filter: blur(5px);
+      font-size: 12px;
+      line-height: 1.45;
+      pointer-events: none;
+      max-width: 320px;
+    }
+    #hud strong { color: #ffffff; }
+
+    #radar {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      width: min(36vw, 300px);
+      aspect-ratio: 1;
+      border-radius: 12px;
+      border: 1px solid var(--hud-border);
+      background: rgba(2, 10, 18, 0.75);
+      backdrop-filter: blur(5px);
+      box-shadow: 0 12px 24px rgba(0, 0, 0, 0.35);
+      overflow: hidden;
+      pointer-events: none;
+    }
+    #radar canvas { width: 100%; height: 100%; display: block; }
+    #radarTitle {
+      position: absolute;
+      left: 10px;
+      top: 8px;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      color: #d5edff;
+      text-transform: uppercase;
+      text-shadow: 0 0 10px rgba(83, 182, 255, 0.4);
+    }
+
+    #actions {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 10px;
+    }
+    button {
+      border: 1px solid rgba(120, 201, 255, 0.45);
+      background: rgba(12, 32, 54, 0.75);
+      color: #d4ecff;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font: 600 13px "JetBrains Mono", "Consolas", monospace;
+      cursor: pointer;
+      transition: transform 120ms ease, background 120ms ease;
+    }
+    button:hover { transform: translateY(-1px); background: rgba(18, 45, 73, 0.85); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    @media (max-width: 720px) {
+      #hud { font-size: 11px; max-width: 260px; }
+      #actions { width: calc(100vw - 24px); justify-content: center; flex-wrap: wrap; }
+      button { padding: 9px 12px; font-size: 12px; }
+    }
+  </style>
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <div id="hud">
+    <div><strong>WyFyre AR (Tailscale)</strong></div>
+    <div id="status">Status: connecting...</div>
+    <div id="transport">Transport: -</div>
+    <div id="targets">Fused Targets: 0</div>
+    <div id="nodes">Nodes: -</div>
+    <div id="pitchNote" style="color: var(--warn)">Pitch ignored for sensor orientation.</div>
+  </div>
+
+  <div id="radar">
+    <div id="radarTitle">Confidence Radar</div>
+    <canvas id="radarCanvas" width="300" height="300"></canvas>
+  </div>
+
+  <div id="actions">
+    <button id="xrBtn">Enter XR</button>
+  </div>
+
+  <script>
+    const WS_PROTO = location.protocol === "https:" ? "wss" : "ws";
+    const WS_URL = `${WS_PROTO}://${location.host}/ws`;
+    const MAX_RENDERED_TARGETS = 8;
+    const SENSOR_HEIGHT_OFFSET_M = -0.15;
+    const LERP = 0.15;
+
+    const sceneCanvas = document.getElementById("scene");
+    const engine = new BABYLON.Engine(sceneCanvas, true);
+    const scene = new BABYLON.Scene(engine);
+    scene.clearColor = new BABYLON.Color4(0.01, 0.03, 0.06, 1.0);
+
+    let camera = new BABYLON.UniversalCamera("cam", new BABYLON.Vector3(0, 1.6, -0.8), scene);
+    camera.setTarget(new BABYLON.Vector3(0, 1.6, 2));
+    camera.attachControl(sceneCanvas, true);
+
+    const light = new BABYLON.HemisphericLight("h", new BABYLON.Vector3(0, 1, 0), scene);
+    light.intensity = 0.65;
+
+    const ground = BABYLON.MeshBuilder.CreateGround("g", { width: 12, height: 12, subdivisions: 10 }, scene);
+    const gm = new BABYLON.StandardMaterial("gm", scene);
+    gm.wireframe = true;
+    gm.alpha = 0.15;
+    gm.emissiveColor = new BABYLON.Color3(0.25, 0.8, 1.0);
+    ground.material = gm;
+
+    const glow = new BABYLON.GlowLayer("gl", scene);
+    glow.intensity = 1.25;
+
+    const targetSlots = [];
+    const slotByTrackId = new Map();
+    const latestTargetPoints = [];
+    let latestHeatmap = null;
+    let latestExtent = null;
+
+    function makeTargetSlot(i) {
+      const root = new BABYLON.TransformNode(`target_${i}`, scene);
+
+      const ping = BABYLON.MeshBuilder.CreateTorus(`ping_${i}`, { diameter: 0.32, thickness: 0.02, tessellation: 42 }, scene);
+      ping.parent = root;
+      ping.rotation.x = Math.PI * 0.5;
+      ping.position.y = SENSOR_HEIGHT_OFFSET_M;
+      const pingMat = new BABYLON.StandardMaterial(`pm_${i}`, scene);
+      pingMat.emissiveColor = new BABYLON.Color3(0.2, 0.95, 1.0);
+      pingMat.alpha = 0.95;
+      ping.material = pingMat;
+
+      const core = BABYLON.MeshBuilder.CreateSphere(`core_${i}`, { diameter: 0.08, segments: 10 }, scene);
+      core.parent = root;
+      core.position.y = SENSOR_HEIGHT_OFFSET_M;
+      const coreMat = new BABYLON.StandardMaterial(`cm_${i}`, scene);
+      coreMat.emissiveColor = new BABYLON.Color3(0.92, 0.99, 1.0);
+      core.material = coreMat;
+
+      const beam = BABYLON.MeshBuilder.CreateCylinder(`beam_${i}`, { height: 0.7, diameter: 0.03, tessellation: 12 }, scene);
+      beam.parent = root;
+      beam.position.y = SENSOR_HEIGHT_OFFSET_M + 0.35;
+      const beamMat = new BABYLON.StandardMaterial(`bm_${i}`, scene);
+      beamMat.emissiveColor = new BABYLON.Color3(0.1, 0.6, 1.0);
+      beamMat.alpha = 0.35;
+      beam.material = beamMat;
+
+      root.setEnabled(false);
+      return {
+        slotIndex: i,
+        trackId: null,
+        root,
+        ping,
+        pingMat,
+        beamMat,
+        confidence: 0,
+        targetPos: new BABYLON.Vector3(0, 0, 0),
+        pulse: 1,
+        lastSeenMs: 0,
+      };
+    }
+
+    for (let i = 0; i < MAX_RENDERED_TARGETS; i += 1) {
+      targetSlots.push(makeTargetSlot(i));
+    }
+
+    function getPoseSourceCamera() {
+      const xrCam = scene.activeCamera;
+      return xrCam || camera;
+    }
+
+    function getYawRadians(cam) {
+      if (cam && cam.absoluteRotation) {
+        return cam.absoluteRotation.toEulerAngles().y;
+      }
+      if (cam && cam.rotation) {
+        return cam.rotation.y;
+      }
+      return 0;
+    }
+
+    function sensorPointToWorld(xMm, yMm) {
+      const cam = getPoseSourceCamera();
+      const yaw = getYawRadians(cam);
+      const local = new BABYLON.Vector3(xMm / 1000, SENSOR_HEIGHT_OFFSET_M, yMm / 1000);
+      const rot = BABYLON.Quaternion.FromEulerAngles(0, yaw, 0);
+      const worldOffset = local.applyRotationQuaternion(rot);
+      return cam.globalPosition.add(worldOffset);
+    }
+
+    function releaseStaleSlots(nowMs) {
+      for (const slot of targetSlots) {
+        if (slot.trackId !== null && (nowMs - slot.lastSeenMs) > 550) {
+          slotByTrackId.delete(slot.trackId);
+          slot.trackId = null;
+          slot.root.setEnabled(false);
+        }
+      }
+    }
+
+    function getFreeSlot() {
+      for (const slot of targetSlots) {
+        if (slot.trackId === null) {
+          return slot;
+        }
+      }
+      return null;
+    }
+
+    function updateTargets(frame) {
+      const nowMs = Date.now();
+      const targets = frame.fused_targets || [];
+      latestTargetPoints.length = 0;
+
+      for (const t of targets.slice(0, MAX_RENDERED_TARGETS)) {
+        let slot = slotByTrackId.get(t.track_id);
+        if (!slot) {
+          slot = getFreeSlot();
+          if (!slot) {
+            continue;
+          }
+          slot.trackId = t.track_id;
+          slotByTrackId.set(t.track_id, slot);
+          slot.pulse = 0;
+          slot.root.setEnabled(true);
+        }
+
+        slot.confidence = Math.max(0, Math.min(1, t.confidence || 0));
+        slot.targetPos.copyFrom(sensorPointToWorld(t.x_mm, t.y_mm));
+        slot.lastSeenMs = nowMs;
+        latestTargetPoints.push({ x_mm: t.x_mm, y_mm: t.y_mm, confidence: slot.confidence });
+      }
+
+      releaseStaleSlots(nowMs);
+      document.getElementById("targets").textContent = `Fused Targets: ${targets.length}`;
+    }
+
+    function updateHud(frame) {
+      const nodeSummary = (frame.status?.nodes || [])
+        .map((n) => n.online ? `${n.node_id}:on(${n.age_ms}ms)` : `${n.node_id}:off`)
+        .join(" | ");
+      document.getElementById("transport").textContent = `Transport: ${frame.receiver_mode}`;
+      document.getElementById("nodes").textContent = `Nodes: ${nodeSummary || "-"}`;
+    }
+
+    function decodeHeatmapBlob(blobB64) {
+      const binary = atob(blobB64);
+      const out = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) {
+        out[i] = binary.charCodeAt(i);
+      }
+      return out;
+    }
+
+    function updateHeatmap(frame) {
+      if (!frame.heatmap || !frame.heatmap.u8_b64) {
+        return;
+      }
+      latestHeatmap = {
+        width: frame.heatmap.width,
+        height: frame.heatmap.height,
+        data: decodeHeatmapBlob(frame.heatmap.u8_b64),
+      };
+      latestExtent = frame.heatmap.extent;
+    }
+
+    const radarCanvas = document.getElementById("radarCanvas");
+    const radarCtx = radarCanvas.getContext("2d");
+
+    function radarToCanvas(xMm, yMm) {
+      const w = radarCanvas.width;
+      const h = radarCanvas.height;
+      const cx = w * 0.5;
+      const cy = h * 0.86;
+      const maxR = h * 0.73;
+
+      const angle = Math.atan2(xMm, Math.max(1, yMm));
+      const distNorm = Math.min(1, Math.sqrt((xMm * xMm + yMm * yMm)) / 6000);
+      const r = distNorm * maxR;
+      return {
+        x: cx + Math.sin(angle) * r,
+        y: cy - Math.cos(angle) * r,
+      };
+    }
+
+    function drawRadarBase() {
+      const w = radarCanvas.width;
+      const h = radarCanvas.height;
+      const cx = w * 0.5;
+      const cy = h * 0.86;
+      const maxR = h * 0.73;
+
+      radarCtx.clearRect(0, 0, w, h);
+      radarCtx.fillStyle = "rgba(3,12,23,0.92)";
+      radarCtx.fillRect(0, 0, w, h);
+
+      radarCtx.beginPath();
+      radarCtx.moveTo(cx, cy);
+      radarCtx.arc(cx, cy, maxR, Math.PI * (1 + 1/6), Math.PI * (2 - 1/6));
+      radarCtx.closePath();
+      radarCtx.fillStyle = "rgba(24,78,118,0.2)";
+      radarCtx.fill();
+
+      radarCtx.strokeStyle = "rgba(102,189,255,0.5)";
+      radarCtx.lineWidth = 1;
+      for (let i = 1; i <= 6; i += 1) {
+        const r = (maxR * i) / 6;
+        radarCtx.beginPath();
+        radarCtx.arc(cx, cy, r, Math.PI * (1 + 1/6), Math.PI * (2 - 1/6));
+        radarCtx.stroke();
+      }
+
+      [-60, -30, 0, 30, 60].forEach((deg) => {
+        const rad = (deg * Math.PI) / 180;
+        const x = cx + Math.sin(rad) * maxR;
+        const y = cy - Math.cos(rad) * maxR;
+        radarCtx.beginPath();
+        radarCtx.moveTo(cx, cy);
+        radarCtx.lineTo(x, y);
+        radarCtx.stroke();
+      });
+    }
+
+    function drawHeatmapOnRadar() {
+      if (!latestHeatmap || !latestExtent) {
+        return;
+      }
+      const hm = latestHeatmap;
+      const ex = latestExtent;
+
+      for (let row = 0; row < hm.height; row += 1) {
+        for (let col = 0; col < hm.width; col += 1) {
+          const i = row * hm.width + col;
+          const v = hm.data[i];
+          if (v < 8) {
+            continue;
+          }
+
+          const xMm = ex.x_min_mm + (col / (hm.width - 1)) * (ex.x_max_mm - ex.x_min_mm);
+          const yMm = ex.y_min_mm + (row / (hm.height - 1)) * (ex.y_max_mm - ex.y_min_mm);
+          const p = radarToCanvas(xMm, yMm);
+
+          const alpha = Math.min(0.55, v / 255 * 0.7);
+          radarCtx.fillStyle = `rgba(${Math.round(255 * (v / 255))}, ${Math.round(200 * (v / 255))}, 50, ${alpha})`;
+          radarCtx.fillRect(p.x - 1.8, p.y - 1.8, 3.6, 3.6);
+        }
+      }
+    }
+
+    function drawTargetsOnRadar() {
+      for (const t of latestTargetPoints) {
+        const p = radarToCanvas(t.x_mm, t.y_mm);
+        radarCtx.beginPath();
+        radarCtx.fillStyle = `rgba(126, 232, 255, ${0.5 + 0.5 * t.confidence})`;
+        radarCtx.arc(p.x, p.y, 2 + 4 * t.confidence, 0, Math.PI * 2);
+        radarCtx.fill();
+      }
+    }
+
+    function renderRadar() {
+      drawRadarBase();
+      drawHeatmapOnRadar();
+      drawTargetsOnRadar();
+    }
+
+    function connectWs() {
+      const ws = new WebSocket(WS_URL);
+      document.getElementById("status").textContent = "Status: connecting...";
+
+      ws.onopen = () => {
+        document.getElementById("status").textContent = "Status: connected";
+        ws.send(JSON.stringify({ type: "hello", role: "quest" }));
+      };
+
+      ws.onmessage = ({ data }) => {
+        const frame = JSON.parse(data);
+        if (frame.type !== "fusion_frame") {
+          return;
+        }
+        updateTargets(frame);
+        updateHeatmap(frame);
+        updateHud(frame);
+      };
+
+      ws.onclose = () => {
+        document.getElementById("status").textContent = "Status: disconnected; retrying...";
+        setTimeout(connectWs, 1500);
+      };
+
+      ws.onerror = () => {
+        document.getElementById("status").textContent = "Status: socket error";
+      };
+    }
+
+    function animateTargets() {
+      const now = Date.now();
+      for (const slot of targetSlots) {
+        if (slot.trackId === null) {
+          continue;
+        }
+        BABYLON.Vector3.LerpToRef(slot.root.position, slot.targetPos, LERP, slot.root.position);
+
+        if (slot.pulse < 1) {
+          slot.pulse = Math.min(1, slot.pulse + 0.06);
+        }
+
+        const pingScale = 1 + slot.pulse * 2.6;
+        slot.ping.scaling.setAll(pingScale);
+        slot.pingMat.alpha = 1.0 - slot.pulse * 0.78;
+
+        const conf = slot.confidence;
+        slot.beamMat.alpha = 0.18 + conf * 0.42;
+        slot.root.setEnabled((now - slot.lastSeenMs) <= 600);
+      }
+    }
+
+    async function setupXr() {
+      const xrBtn = document.getElementById("xrBtn");
+      if (!navigator.xr) {
+        xrBtn.textContent = "XR unavailable";
+        xrBtn.disabled = true;
+        return;
+      }
+
+      let mode = null;
+      if (await navigator.xr.isSessionSupported("immersive-ar")) {
+        mode = "immersive-ar";
+        xrBtn.textContent = "Enter AR";
+      } else if (await navigator.xr.isSessionSupported("immersive-vr")) {
+        mode = "immersive-vr";
+        xrBtn.textContent = "Enter VR";
+      } else {
+        xrBtn.textContent = "XR unsupported";
+        xrBtn.disabled = true;
+        return;
+      }
+
+      xrBtn.onclick = async () => {
+        try {
+          const xr = await scene.createDefaultXRExperienceAsync({
+            uiOptions: { sessionMode: mode },
+            disableDefaultUI: true,
+            disableTeleportation: true,
+            disablePointerSelection: true,
+            disableNearInteraction: true,
+          });
+          await xr.baseExperience.enterXRAsync(mode, "local-floor", xr.renderTarget);
+          if (mode === "immersive-ar") {
+            scene.clearColor = new BABYLON.Color4(0, 0, 0, 0);
+            ground.setEnabled(false);
+          }
+          document.getElementById("actions").style.display = "none";
+        } catch (err) {
+          xrBtn.textContent = `XR error: ${err.message}`;
+        }
+      };
+    }
+
+    connectWs();
+    setupXr();
+
+    scene.onBeforeRenderObservable.add(() => {
+      animateTargets();
+      renderRadar();
+    });
+
+    engine.runRenderLoop(() => scene.render());
+    window.addEventListener("resize", () => engine.resize());
+  </script>
+</body>
+</html>

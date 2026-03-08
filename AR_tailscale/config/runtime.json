@@ -1,0 +1,47 @@
+{
+  "transport": {
+    "mode": "serial",
+    "udp_bind_host": "0.0.0.0",
+    "udp_data_port": 42420,
+    "expected_nodes": [
+      "A"
+    ],
+    "serial_fallback": {
+      "enabled": true,
+      "ports": {
+        "A": "AUTO"
+      },
+      "baud": 115200
+    }
+  },
+  "fusion": {
+    "coordinate_convention": {
+      "local_y_sign": -1
+    },
+    "cluster_radius_mm": 380,
+    "track_match_radius_mm": 450,
+    "track_timeout_ms": 1400,
+    "single_target_min_confidence": 0.2,
+    "heatmap": {
+      "x_min_mm": -3000,
+      "x_max_mm": 3000,
+      "y_min_mm": 0,
+      "y_max_mm": 6000,
+      "cell_size_mm": 80,
+      "gaussian_sigma_mm": 260,
+      "temporal_alpha": 0.28
+    },
+    "confidence_weights": {
+      "sensor_agreement": 0.32,
+      "persistence": 0.22,
+      "speed": 0.1,
+      "angle_consistency": 0.14,
+      "sensor_weight": 0.12,
+      "distance_resolution": 0.1
+    }
+  },
+  "app": {
+    "refresh_ms": 80,
+    "default_mode": "multi"
+  }
+}

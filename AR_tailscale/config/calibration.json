@@ -1,0 +1,26 @@
+{
+  "generated_at": "",
+  "notes": "x_bias_mm and y_bias_mm are added after local->global transform.",
+  "sensor_bias": {
+    "S0": {
+      "x_bias_mm": 0,
+      "y_bias_mm": 0
+    },
+    "S1": {
+      "x_bias_mm": 0,
+      "y_bias_mm": 0
+    },
+    "S2": {
+      "x_bias_mm": 0,
+      "y_bias_mm": 0
+    },
+    "S3": {
+      "x_bias_mm": 0,
+      "y_bias_mm": 0
+    },
+    "S4": {
+      "x_bias_mm": 0,
+      "y_bias_mm": 0
+    }
+  }
+}
