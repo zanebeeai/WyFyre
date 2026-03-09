@@ -128,3 +128,6 @@ ld2450 array -> esp32 nodes -> serial/udp ingest -> fusion engine -> websocket s
 - hardware miniaturization and battery/runtime optimization.
 - richer target classification layers on top of fused tracks.
 - broader headset and mobile ar compatibility testing.
+
+# we won!
+![final handheld product](./public/W_spur.jpg)
