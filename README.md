@@ -6,6 +6,8 @@
 
 wallhacks is a handheld, multi-sensor mmwave system that detects people through non-metal obstacles and renders the results as live ar pings and a confidence radar heatmap.
 
+**demo video: https://youtu.be/Lnjw-XKd-hM?si=fSjub_Zs2NFqdsnU**
+
 ![wallhacks heatmap](./public/wallhacks_heatmap.gif)
 
 - tracks multiple targets in real time with a fused 5-sensor array.
