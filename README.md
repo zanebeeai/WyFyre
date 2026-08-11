@@ -1,3 +1,5 @@
+
+
 # wallhacks.
 
 ![wallhacks thumbnail](./public/wallhacksThumbnail.png)
@@ -95,7 +97,7 @@ ld2450 array -> esp32 nodes -> serial/udp ingest -> fusion engine -> websocket s
 
 ### start backend.
 
-1. cd AR_tailscale_multi
+1. cd AR_tailscale_multi  # Use AR_tailscale for single-client mode
 2. pip install -r requirements.txt
 3. python server.py
 
